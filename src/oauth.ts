@@ -1,11 +1,97 @@
 import { hostname } from "node:os";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
-import { pollOAuthDeviceCodeFlow } from "@earendil-works/pi-ai/oauth";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { fetchJson, fetchJsonResponse } from "./http.js";
 import { hyperBaseUrl, hyperJsonHeaders } from "./hyper.js";
 import { parseSchema } from "./schema.js";
+
+// Inlined from pi-ai (no longer publicly exported)
+const CANCEL_MESSAGE = "Login cancelled";
+const TIMEOUT_MESSAGE = "Device flow timed out";
+const SLOW_DOWN_TIMEOUT_MESSAGE =
+	"Device flow timed out after one or more slow_down responses. This is often caused by clock drift in WSL or VM environments. Please sync or restart the VM clock and try again.";
+const MINIMUM_INTERVAL_MS = 1000;
+const POLL_DEFAULT_INTERVAL_SECONDS = 5;
+const SLOW_DOWN_INTERVAL_INCREMENT_MS = 5000;
+
+type OAuthDeviceCodeIncompletePollResult =
+	| { status: "pending" }
+	| { status: "slow_down"; intervalSeconds?: number }
+	| { status: "failed"; message: string };
+
+type OAuthDeviceCodePollResult<T> = OAuthDeviceCodeIncompletePollResult | { status: "complete"; value: T };
+
+function abortableSleep(ms: number, signal: AbortSignal | undefined, cancelMessage: string): Promise<void> {
+	return new Promise((resolve, reject) => {
+		if (signal?.aborted) {
+			reject(new Error(cancelMessage));
+			return;
+		}
+
+		const onAbort = () => {
+			clearTimeout(timeout);
+			reject(new Error(cancelMessage));
+		};
+		const timeout = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve();
+		}, ms);
+
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
+}
+
+async function pollOAuthDeviceCodeFlow<T>(options: {
+	intervalSeconds?: number;
+	expiresInSeconds?: number;
+	poll: () => Promise<OAuthDeviceCodePollResult<T>>;
+	signal?: AbortSignal;
+}): Promise<T> {
+	const deadline =
+		typeof options.expiresInSeconds === "number"
+			? Date.now() + options.expiresInSeconds * 1000
+			: Number.POSITIVE_INFINITY;
+	let intervalMs = Math.max(
+		MINIMUM_INTERVAL_MS,
+		Math.floor((options.intervalSeconds ?? POLL_DEFAULT_INTERVAL_SECONDS) * 1000),
+	);
+
+	let slowDownResponses = 0;
+
+	while (Date.now() < deadline) {
+		if (options.signal?.aborted) {
+			throw new Error(CANCEL_MESSAGE);
+		}
+
+		const result = await options.poll();
+		if (result.status === "complete") {
+			return result.value;
+		}
+		if (result.status === "failed") {
+			throw new Error(result.message);
+		}
+		if (result.status === "slow_down") {
+			slowDownResponses += 1;
+			intervalMs =
+				typeof result.intervalSeconds === "number" &&
+				Number.isFinite(result.intervalSeconds) &&
+				result.intervalSeconds > 0
+					? Math.max(MINIMUM_INTERVAL_MS, Math.floor(result.intervalSeconds * 1000))
+					: Math.max(MINIMUM_INTERVAL_MS, intervalMs + SLOW_DOWN_INTERVAL_INCREMENT_MS);
+		}
+
+		const remainingMs = deadline - Date.now();
+		if (remainingMs <= 0) {
+			break;
+		}
+
+		await abortableSleep(Math.min(intervalMs, remainingMs), options.signal, CANCEL_MESSAGE);
+	}
+
+	throw new Error(slowDownResponses > 0 ? SLOW_DOWN_TIMEOUT_MESSAGE : TIMEOUT_MESSAGE);
+}
+
 
 const DEFAULT_DEVICE_POLL_INTERVAL_SECONDS = 5;
 const TOKEN_EXPIRY_BUFFER_MS = 30_000;

@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { fetchJson } from "./http.js";
 import { hyperApiBaseUrl, hyperJsonHeaders, PROVIDER_NAME } from "./hyper.js";
@@ -48,8 +49,8 @@ function teamNameStatusText(statusItems: HyperStatusItems, teamName: string | un
 	return `${HYPER_GEM} ${teamName}`;
 }
 
-function storedTeamName(ctx: ExtensionContext): string | undefined {
-	const credential = ctx.modelRegistry.authStorage.get(PROVIDER_NAME);
+function storedTeamName(_ctx: ExtensionContext): string | undefined {
+	const credential = readStoredCredential(PROVIDER_NAME);
 	if (credential?.type !== "oauth") return undefined;
 	const teamName = credential.teamName;
 	return typeof teamName === "string" && teamName.trim() ? teamName : undefined;
