@@ -1,6 +1,6 @@
 {
 	"name": "@charmland/pi-hyper-provider",
-	"version": "0.1.2",
+	"version": "0.1.3",
 	"description": "Pi extension for Charm's Hyper inference provider",
 	"license": "MIT",
 	"keywords": [
