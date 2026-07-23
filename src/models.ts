@@ -1,11 +1,16 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
-import type { ThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
-import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import type { Model, ThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { fetchJson } from "./http.js";
-import { hyperApiBaseUrl, hyperProviderDir, legacyHyperExtensionDir } from "./hyper.js";
+import {
+	HYPER_USER_AGENT,
+	hyperApiBaseUrl,
+	hyperProviderDir,
+	legacyHyperExtensionDir,
+	PROVIDER_NAME,
+} from "./hyper.js";
 import { parseSchema } from "./schema.js";
 
 const MODEL_FETCH_TIMEOUT_MS = 3_000;
@@ -122,8 +127,8 @@ function legacyModelCachePath(): string {
 	return path.join(legacyHyperExtensionDir(), "models.json");
 }
 
-function toProviderModel(model: ProviderModel): ProviderModelConfig {
-	const input: ProviderModelConfig["input"] = model.supports_attachments ? ["text", "image"] : ["text"];
+function toProviderModel(model: ProviderModel): Model<"openai-completions"> {
+	const input: ("text" | "image")[] = model.supports_attachments ? ["text", "image"] : ["text"];
 	const reasoningLevels = model.reasoning_levels ?? [];
 	const supportsReasoningEffort = reasoningLevels.length > 0;
 	const thinkingLevelMap = supportsReasoningEffort
@@ -135,6 +140,10 @@ function toProviderModel(model: ProviderModel): ProviderModelConfig {
 	return {
 		id: model.id,
 		name: model.name,
+		api: "openai-completions",
+		provider: PROVIDER_NAME,
+		baseUrl: hyperApiBaseUrl(),
+		headers: { "User-Agent": HYPER_USER_AGENT },
 		reasoning: model.can_reason,
 		thinkingLevelMap,
 		input,
@@ -157,8 +166,8 @@ function toProviderModel(model: ProviderModel): ProviderModelConfig {
 	};
 }
 
-function toLegacyProviderModel(model: HyperModel): ProviderModelConfig {
-	const input: ProviderModelConfig["input"] = model.supports_attachments ? ["text", "image"] : ["text"];
+function toLegacyProviderModel(model: HyperModel): Model<"openai-completions"> {
+	const input: ("text" | "image")[] = model.supports_attachments ? ["text", "image"] : ["text"];
 	const thinkingLevelMap = model.supports_reasoning_effort
 		? buildThinkingLevelMap(model.reasoning_effort_levels)
 		: model.supports_reasoning
@@ -168,6 +177,10 @@ function toLegacyProviderModel(model: HyperModel): ProviderModelConfig {
 	return {
 		id: model.id,
 		name: model.display_name,
+		api: "openai-completions",
+		provider: PROVIDER_NAME,
+		baseUrl: hyperApiBaseUrl(),
+		headers: { "User-Agent": HYPER_USER_AGENT },
 		reasoning: model.supports_reasoning,
 		thinkingLevelMap,
 		input,
@@ -183,7 +196,7 @@ function toLegacyProviderModel(model: HyperModel): ProviderModelConfig {
 	};
 }
 
-function modelsFromCatalog(catalog: ModelCatalog): ProviderModelConfig[] {
+function modelsFromCatalog(catalog: ModelCatalog): Model<"openai-completions">[] {
 	switch (catalog.kind) {
 		case "provider":
 			return catalog.payload.models.map(toProviderModel);
@@ -330,7 +343,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export async function loadModels(): Promise<ProviderModelConfig[]> {
+export async function loadModels(): Promise<Model<"openai-completions">[]> {
 	try {
 		const payload = await fetchModelPayload();
 		const providerCatalog = providerPayload(payload, "Hyper /provider response");

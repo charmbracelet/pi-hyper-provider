@@ -1,5 +1,5 @@
 import { hostname } from "node:os";
-import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
+import type { AuthInteraction, OAuthCredential } from "@earendil-works/pi-ai";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { fetchJson, fetchJsonResponse } from "./http.js";
@@ -254,9 +254,10 @@ function tokenToCredentials(
 	token: TokenExchangeResponse,
 	fallbackRefreshToken: string,
 	metadata?: { teamName?: string },
-): OAuthCredentials {
+): OAuthCredential {
 	const expires = tokenExpiresAtMs(token);
 	return {
+		type: "oauth",
 		refresh: token.refresh_token || fallbackRefreshToken,
 		access: token.access_token,
 		expires,
@@ -275,30 +276,31 @@ function tokenExpiresAtMs(token: TokenExchangeResponse): number {
 	return expiresAt - bufferMs;
 }
 
-export async function loginHyper(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
-	const deviceAuth = await initiateDeviceAuth(callbacks.signal);
-	callbacks.onDeviceCode({
+export async function loginHyper(interaction: AuthInteraction): Promise<OAuthCredential> {
+	const deviceAuth = await initiateDeviceAuth(interaction.signal);
+	interaction.notify({
+		type: "device_code",
 		userCode: deviceAuth.user_code,
 		verificationUri: deviceAuth.verification_url,
 		intervalSeconds: deviceAuth.interval ?? DEFAULT_DEVICE_POLL_INTERVAL_SECONDS,
 		expiresInSeconds: deviceAuth.expires_in,
 	});
 
-	const deviceToken = await pollDeviceAuth(deviceAuth, callbacks.signal);
-	const token = await exchangeRefreshToken(deviceToken.refresh_token, callbacks.signal);
+	const deviceToken = await pollDeviceAuth(deviceAuth, interaction.signal);
+	const token = await exchangeRefreshToken(deviceToken.refresh_token, interaction.signal);
 	return tokenToCredentials(token, deviceToken.refresh_token, {
 		teamName: deviceToken.team_name,
 	});
 }
 
-export async function refreshHyperToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
-	const token = await exchangeRefreshToken(credentials.refresh);
-	return tokenToCredentials(token, credentials.refresh, {
-		teamName: teamNameFromCredentials(credentials),
+export async function refreshHyperToken(credential: OAuthCredential, signal?: AbortSignal): Promise<OAuthCredential> {
+	const token = await exchangeRefreshToken(credential.refresh, signal);
+	return tokenToCredentials(token, credential.refresh, {
+		teamName: teamNameFromCredentials(credential),
 	});
 }
 
-function teamNameFromCredentials(credentials: OAuthCredentials): string | undefined {
-	const teamName = credentials.teamName;
+function teamNameFromCredentials(credential: OAuthCredential): string | undefined {
+	const teamName = credential.teamName;
 	return typeof teamName === "string" && teamName.trim() ? teamName : undefined;
 }
