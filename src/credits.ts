@@ -95,6 +95,7 @@ export function registerCreditStatus(pi: ExtensionAPI): void {
 	}
 
 	function refreshInBackground(ctx: ExtensionContext, selectedModel: ExtensionContext["model"] = ctx.model): void {
+		if (!ctx.hasUI) return;
 		void refresh(ctx, selectedModel).catch((err) => {
 			console.error(`Failed to update Hyper status: ${String(err)}`);
 		});
