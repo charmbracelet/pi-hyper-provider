@@ -15,6 +15,8 @@ const MINIMUM_INTERVAL_MS = 1000;
 const POLL_DEFAULT_INTERVAL_SECONDS = 5;
 const SLOW_DOWN_INTERVAL_INCREMENT_MS = 5000;
 
+const RELOGIN_MESSAGE = "Your Hyper oauth credentials expired. Run /login hyper to authenticate again.";
+
 type OAuthDeviceCodeIncompletePollResult =
 	| { status: "pending" }
 	| { status: "slow_down"; intervalSeconds?: number }
@@ -228,15 +230,50 @@ function parseDevicePollResponse(payload: unknown, source = "Hyper device token 
 	throw new Error("Hyper device token response is invalid");
 }
 
-async function exchangeRefreshToken(refreshToken: string, signal?: AbortSignal): Promise<TokenExchangeResponse> {
-	const payload = await fetchJson(`${hyperBaseUrl()}/token/exchange`, {
+async function exchangeRefreshToken(
+	refreshToken: string,
+	signal?: AbortSignal,
+	options: { reloginOnInvalidToken?: boolean } = {},
+): Promise<TokenExchangeResponse> {
+	const response = await fetchJsonResponse(`${hyperBaseUrl()}/token/exchange`, {
 		method: "POST",
 		headers: hyperJsonHeaders(),
 		body: JSON.stringify({ refresh_token: refreshToken }),
 		signal,
 		timeoutMs: OAUTH_FETCH_TIMEOUT_MS,
+		allowHttpErrorPayload: true,
 	});
-	return parseTokenExchangeResponse(payload);
+	if (!response.ok) {
+		if (options.reloginOnInvalidToken && isInvalidRefreshTokenError(response.status, response.payload)) {
+			throw new Error(RELOGIN_MESSAGE);
+		}
+		throw new Error(
+			`${hyperBaseUrl()}/token/exchange returned HTTP ${response.status}: ${summarizePayload(response.payload)}`,
+		);
+	}
+	return parseTokenExchangeResponse(response.payload);
+}
+
+function isInvalidRefreshTokenError(status: number, payload: unknown): boolean {
+	if (status !== 400 && status !== 401) return false;
+	if (!isRecord(payload)) return false;
+	const error = payload.error;
+	if (typeof error === "string" && /invalid|not found|expired|revoked/i.test(error)) return true;
+	const description = payload.error_description;
+	return typeof description === "string" && /invalid|not found|expired|revoked/i.test(description);
+}
+
+function summarizePayload(payload: unknown): string {
+	if (typeof payload === "string") return payload;
+	try {
+		return JSON.stringify(payload);
+	} catch {
+		return String(payload);
+	}
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function parseTokenExchangeResponse(payload: unknown): TokenExchangeResponse {
@@ -294,7 +331,7 @@ export async function loginHyper(interaction: AuthInteraction): Promise<OAuthCre
 }
 
 export async function refreshHyperToken(credential: OAuthCredential, signal?: AbortSignal): Promise<OAuthCredential> {
-	const token = await exchangeRefreshToken(credential.refresh, signal);
+	const token = await exchangeRefreshToken(credential.refresh, signal, { reloginOnInvalidToken: true });
 	return tokenToCredentials(token, credential.refresh, {
 		teamName: teamNameFromCredentials(credential),
 	});
