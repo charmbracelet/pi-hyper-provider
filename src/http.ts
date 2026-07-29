@@ -13,6 +13,60 @@ export interface FetchJsonResponse {
 	payload: unknown;
 }
 
+export class HttpResponseError extends Error {
+	readonly kind = "http";
+
+	constructor(
+		readonly status: number,
+		message: string,
+	) {
+		super(message);
+		this.name = "HttpResponseError";
+	}
+}
+
+export class HttpTimeoutError extends Error {
+	readonly kind = "timeout";
+
+	constructor(message: string, cause: unknown) {
+		super(message, { cause });
+		this.name = "HttpTimeoutError";
+	}
+}
+
+export class HttpResponseTimeoutError extends HttpTimeoutError {
+	constructor(
+		readonly status: number,
+		message: string,
+		cause: unknown,
+	) {
+		super(message, cause);
+		this.name = "HttpResponseTimeoutError";
+	}
+}
+
+export class HttpNetworkError extends Error {
+	readonly kind = "network";
+
+	constructor(message: string, cause: unknown) {
+		super(message, { cause });
+		this.name = "HttpNetworkError";
+	}
+}
+
+export class HttpResponsePayloadError extends Error {
+	readonly kind = "response";
+
+	constructor(
+		readonly status: number,
+		message: string,
+		cause?: unknown,
+	) {
+		super(message, cause === undefined ? undefined : { cause });
+		this.name = "HttpResponsePayloadError";
+	}
+}
+
 export async function fetchJson(url: string, options: FetchJsonOptions): Promise<unknown> {
 	return (await fetchJsonResponse(url, options)).payload;
 }
@@ -43,9 +97,31 @@ export async function fetchJsonResponse(url: string, options: FetchJsonOptions):
 			body: options.body,
 			signal: controller.signal,
 		});
-		const body = await response.text();
+		let body: string;
+		try {
+			body = await response.text();
+		} catch (error) {
+			if (timedOut) {
+				throw new HttpResponseTimeoutError(
+					response.status,
+					`${url} timed out after ${options.timeoutMs}ms while reading HTTP ${response.status} response body`,
+					error,
+				);
+			}
+			if (callerAborted) throw error;
+			if (!response.ok && !options.allowHttpErrorPayload) {
+				throw new HttpResponseError(
+					response.status,
+					`${url} returned HTTP ${response.status}; response body could not be read`,
+				);
+			}
+			throw new HttpNetworkError(
+				`${url} returned HTTP ${response.status}; response body could not be read`,
+				error,
+			);
+		}
 		if (!response.ok && !options.allowHttpErrorPayload) {
-			throw new Error(`${url} returned HTTP ${response.status}: ${summarizeBody(body)}`);
+			throw new HttpResponseError(response.status, `${url} returned HTTP ${response.status}: ${summarizeBody(body)}`);
 		}
 		return {
 			status: response.status,
@@ -53,13 +129,21 @@ export async function fetchJsonResponse(url: string, options: FetchJsonOptions):
 			payload: parseJsonBody(url, response.status, body),
 		};
 	} catch (err) {
+		if (
+			err instanceof HttpResponseError ||
+			err instanceof HttpResponsePayloadError ||
+			err instanceof HttpNetworkError ||
+			err instanceof HttpTimeoutError
+		) {
+			throw err;
+		}
 		if (timedOut) {
-			throw new Error(`${url} timed out after ${options.timeoutMs}ms`, { cause: err });
+			throw new HttpTimeoutError(`${url} timed out after ${options.timeoutMs}ms`, err);
 		}
 		if (callerAborted) {
 			throw new Error(`${url} request was aborted`, { cause: err });
 		}
-		throw err;
+		throw new HttpNetworkError(`${url} request failed`, err);
 	} finally {
 		clearTimeout(timeout);
 		options.signal?.removeEventListener("abort", abortFromCaller);
@@ -68,12 +152,16 @@ export async function fetchJsonResponse(url: string, options: FetchJsonOptions):
 
 function parseJsonBody(url: string, status: number, body: string): unknown {
 	if (!body.trim()) {
-		throw new Error(`${url} returned HTTP ${status} with an empty JSON body`);
+		throw new HttpResponsePayloadError(status, `${url} returned HTTP ${status} with an empty JSON body`);
 	}
 	try {
 		return JSON.parse(body);
 	} catch (err) {
-		throw new Error(`${url} returned invalid JSON (HTTP ${status}): ${summarizeBody(body)}`, { cause: err });
+		throw new HttpResponsePayloadError(
+			status,
+			`${url} returned invalid JSON (HTTP ${status}): ${summarizeBody(body)}`,
+			err,
+		);
 	}
 }
 

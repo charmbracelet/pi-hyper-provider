@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { fetchJson } from "./http.js";
+import { fetchJson, HttpNetworkError, HttpResponseError, HttpTimeoutError } from "./http.js";
 import { hyperApiBaseUrl, hyperJsonHeaders, PROVIDER_NAME } from "./hyper.js";
 import { parseSchema } from "./schema.js";
 import {
@@ -13,6 +13,9 @@ import {
 
 const HYPER_GEM = "\x1b[38;2;255;96;255m◆\x1b[39m";
 const CREDITS_FETCH_TIMEOUT_MS = 10_000;
+const CREDITS_RETRY_DELAY_MS_INITIAL = 5_000;
+const CREDITS_RETRY_DELAY_MS_MAX = 5 * 60_000;
+const CREDITS_RETRY_EXPONENT_MAX = 6;
 
 const CreditsPayloadSchema = Type.Object(
 	{
@@ -57,48 +60,162 @@ function storedTeamName(): string | undefined {
 }
 
 export function registerCreditStatus(pi: ExtensionAPI): void {
-	let refreshGeneration = 0;
+	let invocationSequence = 0;
+	let committedInvocation = 0;
+	let credentialEpoch = 0;
+	let consecutiveFailures = 0;
+	let retryAfterMs = 0;
+	let currentApiKey: string | undefined;
+	let cachedBalance: number | undefined;
+	let inFlight: { apiKey: string; credentialEpoch: number; operation: Promise<void> } | undefined;
+	type CredentialLease = { apiKey: string; credentialEpoch: number };
 
-	async function refresh(ctx: ExtensionContext, selectedModel: ExtensionContext["model"] = ctx.model): Promise<void> {
-		const generation = refreshGeneration + 1;
-		refreshGeneration = generation;
+	function clearCreditState(): void {
+		cachedBalance = undefined;
+		consecutiveFailures = 0;
+		retryAfterMs = 0;
+	}
 
+	function renderStatus(ctx: ExtensionContext): void {
+		const statusItems = readHyperStatusItems();
+		const teamName = storedTeamName();
+		if (!statusItems.hypercredits || cachedBalance === undefined) {
+			ctx.ui.setStatus(PROVIDER_NAME, teamNameStatusText(statusItems, teamName));
+			return;
+		}
+		ctx.ui.setStatus(PROVIDER_NAME, statusText(cachedBalance, statusItems, teamName));
+	}
+
+	function ownsCredential(lease: CredentialLease): boolean {
+		return lease.apiKey === currentApiKey && lease.credentialEpoch === credentialEpoch;
+	}
+
+	function render(ctx: ExtensionContext, lease: CredentialLease): void {
+		if (!ownsCredential(lease)) return;
+		renderStatus(ctx);
+	}
+
+	async function fetchAndCache(apiKey: string, expectedCredentialEpoch: number): Promise<void> {
+		try {
+			const balance = await fetchCredits(apiKey);
+			if (credentialEpoch !== expectedCredentialEpoch || currentApiKey !== apiKey) return;
+			cachedBalance = balance;
+			consecutiveFailures = 0;
+			retryAfterMs = 0;
+		} catch (error) {
+			if (credentialEpoch !== expectedCredentialEpoch || currentApiKey !== apiKey) throw error;
+			const transient =
+				error instanceof HttpNetworkError ||
+				error instanceof HttpTimeoutError ||
+				(error instanceof HttpResponseError &&
+					(error.status === 408 || error.status === 429 || (error.status >= 500 && error.status <= 599)));
+			if (!transient) {
+				clearCreditState();
+				throw error;
+			}
+			consecutiveFailures += 1;
+			const retryDelayMs = Math.min(
+				CREDITS_RETRY_DELAY_MS_INITIAL * 2 ** Math.min(consecutiveFailures - 1, CREDITS_RETRY_EXPONENT_MAX),
+				CREDITS_RETRY_DELAY_MS_MAX,
+			);
+			retryAfterMs = Date.now() + retryDelayMs;
+			throw error;
+		}
+	}
+
+	async function shareFetch(apiKey: string, expectedCredentialEpoch: number): Promise<void> {
+		const active = inFlight;
+		if (active?.apiKey === apiKey && active.credentialEpoch === expectedCredentialEpoch) {
+			await active.operation;
+			return;
+		}
+
+		const operation = fetchAndCache(apiKey, expectedCredentialEpoch);
+		const started = { apiKey, credentialEpoch: expectedCredentialEpoch, operation };
+		inFlight = started;
+		try {
+			await operation;
+		} finally {
+			if (inFlight === started) {
+				inFlight = undefined;
+			}
+		}
+	}
+
+	async function refresh(
+		ctx: ExtensionContext,
+		selectedModel: ExtensionContext["model"] = ctx.model,
+		isUserRequested = false,
+	): Promise<void> {
+		const invocation = invocationSequence + 1;
+		invocationSequence = invocation;
+		const forcedLease: CredentialLease | undefined =
+			isUserRequested && currentApiKey !== undefined ? { apiKey: currentApiKey, credentialEpoch } : undefined;
+		let failureLease: CredentialLease | undefined;
 		if (!isHyperModel(selectedModel)) {
+			committedInvocation = invocation;
+			credentialEpoch += 1;
 			ctx.ui.setStatus(PROVIDER_NAME, undefined);
 			return;
 		}
 
 		const statusItems = readHyperStatusItems();
-		const teamName = storedTeamName();
 		if (!statusItems.hypercredits) {
-			ctx.ui.setStatus(PROVIDER_NAME, teamNameStatusText(statusItems, teamName));
+			committedInvocation = invocation;
+			credentialEpoch += 1;
+			renderStatus(ctx);
 			return;
 		}
 
-		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(selectedModel);
-		if (!auth.ok || !auth.apiKey) {
-			ctx.ui.setStatus(PROVIDER_NAME, undefined);
-			return;
-		}
-
+		// Settings and team metadata do not depend on auth. Re-render them now,
+		// retaining a balance only while it belongs to the committed credential.
+		renderStatus(ctx);
 		try {
-			const balance = await fetchCredits(auth.apiKey);
-			if (generation === refreshGeneration) {
-				ctx.ui.setStatus(PROVIDER_NAME, statusText(balance, statusItems, teamName));
+			const auth = await ctx.modelRegistry.getApiKeyAndHeaders(selectedModel);
+			const forcedLeaseStillValid =
+				forcedLease !== undefined && auth.ok && auth.apiKey === forcedLease.apiKey && ownsCredential(forcedLease);
+			if (invocation < committedInvocation && !forcedLeaseStillValid) return;
+			if (!auth.ok || !auth.apiKey) {
+				committedInvocation = invocation;
+				credentialEpoch += 1;
+				currentApiKey = undefined;
+				clearCreditState();
+				renderStatus(ctx);
+				return;
 			}
-		} catch (err) {
-			console.error(`Failed to fetch Hyper /credits: ${String(err)}`);
-			if (generation === refreshGeneration) {
-				ctx.ui.setStatus(PROVIDER_NAME, undefined);
+			if (invocation >= committedInvocation) committedInvocation = invocation;
+			if (!isUserRequested && currentApiKey === auth.apiKey && Date.now() < retryAfterMs) {
+				// This auth result supersedes older general state, but a same-credential
+				// forced refresh retains its independent fetch lease.
+				return;
+			}
+			if (currentApiKey !== auth.apiKey) {
+				currentApiKey = auth.apiKey;
+				credentialEpoch += 1;
+				clearCreditState();
+				// Never show the previous account while the replacement request runs.
+				renderStatus(ctx);
+			}
+			const expectedCredentialEpoch = credentialEpoch;
+			const lease = { apiKey: auth.apiKey, credentialEpoch: expectedCredentialEpoch };
+			failureLease = lease;
+			await shareFetch(auth.apiKey, expectedCredentialEpoch);
+			render(ctx, lease);
+		} catch {
+			const failedOperationStillOwnsCredential = failureLease !== undefined && ownsCredential(failureLease);
+			if (failureLease !== undefined && failedOperationStillOwnsCredential) render(ctx, failureLease);
+			if (
+				isUserRequested &&
+				(failedOperationStillOwnsCredential || (failureLease === undefined && invocation === invocationSequence))
+			) {
+				ctx.ui.notify("Unable to refresh Hypercredit balance", "warning");
 			}
 		}
 	}
 
 	function refreshInBackground(ctx: ExtensionContext, selectedModel: ExtensionContext["model"] = ctx.model): void {
 		if (!ctx.hasUI) return;
-		void refresh(ctx, selectedModel).catch((err) => {
-			console.error(`Failed to update Hyper status: ${String(err)}`);
-		});
+		void refresh(ctx, selectedModel).catch(() => undefined);
 	}
 
 	pi.registerCommand("hyper-status", {
@@ -111,13 +228,13 @@ export function registerCreditStatus(pi: ExtensionAPI): void {
 				}
 
 				const changed = await configureStatusItems(ctx);
-				if (changed) await refresh(ctx);
+				if (changed) await refresh(ctx, ctx.model, true);
 				return;
 			}
 
-			const message = updateStatusItems(args);
-			ctx.ui.notify(message, "info");
-			await refresh(ctx);
+			const result = updateStatusItems(args);
+			ctx.ui.notify(result.message, "info");
+			if (result.kind === "changed") await refresh(ctx, ctx.model, true);
 		},
 	});
 
@@ -190,31 +307,44 @@ async function configureStatusItems(ctx: ExtensionContext): Promise<boolean> {
 	}
 }
 
-function updateStatusItems(args: string): string {
+type StatusItemsUpdate =
+	| { kind: "changed"; message: string }
+	| { kind: "unchanged"; message: string }
+	| { kind: "invalid"; message: string };
+
+function updateStatusItems(args: string): StatusItemsUpdate {
 	const tokens = args.trim().split(/\s+/).filter(Boolean);
 	if (tokens.length === 0) {
-		return statusItemsSummary(readHyperStatusItems());
+		return { kind: "unchanged", message: statusItemsSummary(readHyperStatusItems()) };
 	}
 	if (tokens.length === 1 && tokens[0] === "reset") {
 		const statusItems = defaultHyperStatusItems();
+		const previous = readHyperStatusItems();
+		if (sameStatusItems(previous, statusItems)) {
+			return { kind: "unchanged", message: `Hyper status unchanged. ${statusItemsSummary(statusItems)}` };
+		}
 		writeHyperStatusItems(statusItems);
-		return `Hyper status reset. ${statusItemsSummary(statusItems)}`;
+		return { kind: "changed", message: `Hyper status reset. ${statusItemsSummary(statusItems)}` };
 	}
 	if (tokens.length !== 2) {
-		return "Usage: /hyper-status [teamName true|false | hypercredits true|false | reset]";
+		return { kind: "invalid", message: "Usage: /hyper-status [teamName true|false | hypercredits true|false | reset]" };
 	}
 
 	const [key, rawValue] = tokens;
 	if ((key !== "teamName" && key !== "hypercredits") || (rawValue !== "true" && rawValue !== "false")) {
-		return "Usage: /hyper-status [teamName true|false | hypercredits true|false | reset]";
+		return { kind: "invalid", message: "Usage: /hyper-status [teamName true|false | hypercredits true|false | reset]" };
 	}
 
+	const previous = readHyperStatusItems();
 	const statusItems = {
-		...readHyperStatusItems(),
+		...previous,
 		[key]: rawValue === "true",
 	};
+	if (sameStatusItems(previous, statusItems)) {
+		return { kind: "unchanged", message: `Hyper status unchanged. ${statusItemsSummary(statusItems)}` };
+	}
 	writeHyperStatusItems(statusItems);
-	return `Hyper status updated. ${statusItemsSummary(statusItems)}`;
+	return { kind: "changed", message: `Hyper status updated. ${statusItemsSummary(statusItems)}` };
 }
 
 function onOff(value: boolean): "on" | "off" {
