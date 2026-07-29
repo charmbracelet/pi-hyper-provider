@@ -4,15 +4,21 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerCreditStatus } from "./credits.js";
 import { hyperApiBaseUrl, PROVIDER_DISPLAY_NAME, PROVIDER_NAME } from "./hyper.js";
 import { loadModels } from "./models.js";
+import { createNotifier } from "./notify.js";
 import { loginHyper, refreshHyperToken } from "./oauth.js";
 import { migrateHyperSettings } from "./settings.js";
 export default async function (pi: ExtensionAPI) {
+	const notifier = createNotifier();
+	pi.on("session_start", (_event, ctx) => {
+		notifier.activate(ctx);
+	});
+
 	try {
-		migrateHyperSettings();
+		migrateHyperSettings(notifier.warn);
 	} catch (err) {
-		console.error(`Failed to migrate Hyper settings: ${String(err)}`);
+		notifier.warn(`Failed to migrate Hyper settings: ${String(err)}`);
 	}
-	const models = await loadModels();
+	const models = await loadModels(notifier.notify);
 
 	pi.registerProvider(
 		createProvider({
@@ -33,5 +39,5 @@ export default async function (pi: ExtensionAPI) {
 		}),
 	);
 
-	registerCreditStatus(pi);
+	registerCreditStatus(pi, notifier.warn);
 }

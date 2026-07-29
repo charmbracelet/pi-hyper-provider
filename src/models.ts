@@ -11,6 +11,7 @@ import {
 	legacyHyperExtensionDir,
 	PROVIDER_NAME,
 } from "./hyper.js";
+import type { NotificationSink } from "./notify.js";
 import { parseSchema } from "./schema.js";
 
 const MODEL_FETCH_TIMEOUT_MS = 3_000;
@@ -237,38 +238,40 @@ async function fetchModelPayload(): Promise<unknown> {
 	});
 }
 
-function readCachedModelCatalog(): ModelCatalog | undefined {
+function readCachedModelCatalog(notify: NotificationSink): ModelCatalog | undefined {
 	const cachePath = modelCachePath();
-	const cache = readModelCache(cachePath, "Hyper model cache");
+	const cache = readModelCache(cachePath, "Hyper model cache", notify);
 	if (cache.status === "hit") return cache.catalog;
 	if (cache.status === "blocked") return undefined;
 
-	const legacyCache = readModelCache(legacyModelCachePath(), "legacy Hyper model cache");
+	const legacyCache = readModelCache(legacyModelCachePath(), "legacy Hyper model cache", notify);
 	return legacyCache.status === "hit" ? legacyCache.catalog : undefined;
 }
 
-function readJsonCache(cachePath: string, description: string): unknown | undefined {
-	if (!existsSync(cachePath)) return undefined;
+function readModelCache(cachePath: string, description: string, notify: NotificationSink): ModelCacheRead {
+	if (!existsSync(cachePath)) return { status: "miss" };
 	try {
-		return JSON.parse(readFileSync(cachePath, "utf-8"));
+		const cache: unknown = JSON.parse(readFileSync(cachePath, "utf-8"));
+		return unwrapModelCache(cache, description, notify);
 	} catch (err) {
-		console.error(`Failed to read ${description} at ${cachePath}: ${String(err)}`);
-		return undefined;
+		// Cache is disposable: warn, treat as a miss, and let the next
+		// successful fetch rewrite it.
+		notify(`Ignoring unreadable ${description} at ${cachePath} (${formatErrorDetail(err)}); will re-fetch`, "warning");
+		return { status: "miss" };
 	}
 }
 
-function readModelCache(cachePath: string, description: string): ModelCacheRead {
-	const cache = readJsonCache(cachePath, description);
-	if (cache === undefined) return { status: "miss" };
-	return unwrapModelCache(cache, description);
-}
-
-function unwrapModelCache(cache: unknown, description: string): ModelCacheRead {
+function unwrapModelCache(cache: unknown, description: string, notify: NotificationSink): ModelCacheRead {
 	const envelopeBaseUrl = modelCacheEnvelopeBaseUrl(cache);
 	if (envelopeBaseUrl !== undefined) {
 		const expectedBaseUrl = hyperApiBaseUrl();
 		if (envelopeBaseUrl !== expectedBaseUrl) {
-			console.error(`Ignoring ${description} for ${envelopeBaseUrl}; current Hyper API base URL is ${expectedBaseUrl}`);
+			// Keep the cache: it stays usable if the base URL later reverts, and
+			// loadModels replaces it once a fetch against the new URL succeeds.
+			notify(
+				`Ignoring ${description} for ${envelopeBaseUrl}; current Hyper API base URL is ${expectedBaseUrl}`,
+				"warning",
+			);
 			return { status: "blocked" };
 		}
 	}
@@ -279,13 +282,12 @@ function unwrapModelCache(cache: unknown, description: string): ModelCacheRead {
 	}
 
 	if (isModelCacheEnvelopeLike(cache)) {
-		console.error(`Ignoring invalid ${description} metadata`);
+		notify(`Ignoring invalid ${description} metadata`, "warning");
 		return { status: "blocked" };
 	}
 
 	const catalog = optionalModelCatalog(cache);
 	if (catalog === undefined) {
-		console.error(`Ignoring invalid ${description}`);
 		return { status: "miss" };
 	}
 
@@ -314,23 +316,22 @@ function modelCacheEnvelope(payload: ProviderPayload): ModelCacheEnvelope {
 	};
 }
 
-function writeCachedModelPayload(payload: ProviderPayload): void {
+function writeCachedModelPayload(payload: ProviderPayload, notify: NotificationSink): void {
 	try {
 		mkdirSync(hyperProviderDir(), { recursive: true });
 		writeFileSync(modelCachePath(), `${JSON.stringify(modelCacheEnvelope(payload), null, 2)}\n`, "utf-8");
-		removeLegacyModelCache();
+		removeModelCache(legacyModelCachePath(), "legacy Hyper model cache", notify);
 	} catch (err) {
-		console.error(`Failed to write Hyper model cache: ${String(err)}`);
+		notify(`Failed to write Hyper model cache: ${String(err)}`, "warning");
 	}
 }
 
-function removeLegacyModelCache(): void {
-	const cachePath = legacyModelCachePath();
+function removeModelCache(cachePath: string, description: string, notify: NotificationSink): void {
 	try {
 		unlinkSync(cachePath);
 	} catch (err) {
 		if (errorCode(err) === "ENOENT") return;
-		console.error(`Failed to remove legacy Hyper model cache at ${cachePath}: ${String(err)}`);
+		notify(`Failed to remove ${description} at ${cachePath}: ${String(err)}`, "warning");
 	}
 }
 
@@ -343,18 +344,30 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export async function loadModels(): Promise<Model<"openai-completions">[]> {
+export async function loadModels(notify: NotificationSink): Promise<Model<"openai-completions">[]> {
 	try {
 		const payload = await fetchModelPayload();
 		const providerCatalog = providerPayload(payload, "Hyper /provider response");
-		writeCachedModelPayload(providerCatalog);
+		writeCachedModelPayload(providerCatalog, notify);
 		return providerCatalog.models.map(toProviderModel);
 	} catch (err) {
-		const cachedCatalog = readCachedModelCatalog();
+		const detail = formatErrorDetail(err);
+		const cachedCatalog = readCachedModelCatalog(notify);
 		if (cachedCatalog !== undefined) {
-			console.error(`Failed to fetch Hyper /provider, using cached model list: ${String(err)}`);
+			notify(`Failed to fetch Hyper /provider, using cached model list: ${detail}`, "warning");
 			return modelsFromCatalog(cachedCatalog);
 		}
-		throw err;
+		notify(`Failed to load Hyper models and no usable cache is available: ${detail}`, "error");
+		return [];
 	}
+}
+
+// Error messages may embed raw server response bodies (including HTML error
+// pages); clamp to one short line so notifications stay readable.
+function formatErrorDetail(err: unknown): string {
+	const message = err instanceof Error ? err.message : String(err);
+	const oneLine = message.replace(/\s+/g, " ").trim();
+	const maxDetailCharacters = 120;
+	if (oneLine.length <= maxDetailCharacters) return oneLine;
+	return `${oneLine.slice(0, maxDetailCharacters)}…`;
 }

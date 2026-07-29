@@ -3,6 +3,7 @@ import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { fetchJson, HttpNetworkError, HttpResponseError, HttpTimeoutError } from "./http.js";
 import { hyperApiBaseUrl, hyperJsonHeaders, PROVIDER_NAME } from "./hyper.js";
+import type { WarningSink } from "./notify.js";
 import { parseSchema } from "./schema.js";
 import {
 	defaultHyperStatusItems,
@@ -59,7 +60,7 @@ function storedTeamName(): string | undefined {
 	return typeof teamName === "string" && teamName.trim() ? teamName : undefined;
 }
 
-export function registerCreditStatus(pi: ExtensionAPI): void {
+export function registerCreditStatus(pi: ExtensionAPI, warn: WarningSink): void {
 	let invocationSequence = 0;
 	let committedInvocation = 0;
 	let credentialEpoch = 0;
@@ -77,7 +78,7 @@ export function registerCreditStatus(pi: ExtensionAPI): void {
 	}
 
 	function renderStatus(ctx: ExtensionContext): void {
-		const statusItems = readHyperStatusItems();
+		const statusItems = readHyperStatusItems(warn);
 		const teamName = storedTeamName();
 		if (!statusItems.hypercredits || cachedBalance === undefined) {
 			ctx.ui.setStatus(PROVIDER_NAME, teamNameStatusText(statusItems, teamName));
@@ -159,7 +160,7 @@ export function registerCreditStatus(pi: ExtensionAPI): void {
 			return;
 		}
 
-		const statusItems = readHyperStatusItems();
+		const statusItems = readHyperStatusItems(warn);
 		if (!statusItems.hypercredits) {
 			committedInvocation = invocation;
 			credentialEpoch += 1;
@@ -223,16 +224,16 @@ export function registerCreditStatus(pi: ExtensionAPI): void {
 		handler: async (args, ctx) => {
 			if (!args.trim()) {
 				if (!ctx.hasUI) {
-					ctx.ui.notify(statusItemsSummary(readHyperStatusItems()), "info");
+					ctx.ui.notify(statusItemsSummary(readHyperStatusItems(warn)), "info");
 					return;
 				}
 
-				const changed = await configureStatusItems(ctx);
+				const changed = await configureStatusItems(ctx, warn);
 				if (changed) await refresh(ctx, ctx.model, true);
 				return;
 			}
 
-			const result = updateStatusItems(args);
+			const result = updateStatusItems(args, warn);
 			ctx.ui.notify(result.message, "info");
 			if (result.kind === "changed") await refresh(ctx, ctx.model, true);
 		},
@@ -253,8 +254,8 @@ export function registerCreditStatus(pi: ExtensionAPI): void {
 	});
 }
 
-async function configureStatusItems(ctx: ExtensionContext): Promise<boolean> {
-	const initial = readHyperStatusItems();
+async function configureStatusItems(ctx: ExtensionContext, warn: (message: string) => void): Promise<boolean> {
+	const initial = readHyperStatusItems(warn);
 	let draft: HyperStatusItems = { ...initial };
 
 	for (;;) {
@@ -312,14 +313,14 @@ type StatusItemsUpdate =
 	| { kind: "unchanged"; message: string }
 	| { kind: "invalid"; message: string };
 
-function updateStatusItems(args: string): StatusItemsUpdate {
+function updateStatusItems(args: string, warn?: (message: string) => void): StatusItemsUpdate {
 	const tokens = args.trim().split(/\s+/).filter(Boolean);
 	if (tokens.length === 0) {
-		return { kind: "unchanged", message: statusItemsSummary(readHyperStatusItems()) };
+		return { kind: "unchanged", message: statusItemsSummary(readHyperStatusItems(warn)) };
 	}
 	if (tokens.length === 1 && tokens[0] === "reset") {
 		const statusItems = defaultHyperStatusItems();
-		const previous = readHyperStatusItems();
+		const previous = readHyperStatusItems(warn);
 		if (sameStatusItems(previous, statusItems)) {
 			return { kind: "unchanged", message: `Hyper status unchanged. ${statusItemsSummary(statusItems)}` };
 		}
@@ -335,7 +336,7 @@ function updateStatusItems(args: string): StatusItemsUpdate {
 		return { kind: "invalid", message: "Usage: /hyper-status [teamName true|false | hypercredits true|false | reset]" };
 	}
 
-	const previous = readHyperStatusItems();
+	const previous = readHyperStatusItems(warn);
 	const statusItems = {
 		...previous,
 		[key]: rawValue === "true",

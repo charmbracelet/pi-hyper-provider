@@ -4,6 +4,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { hyperProviderDir } from "./hyper.js";
+import type { WarningSink } from "./notify.js";
 
 const HyperStatusItemsSchema = Type.Object(
 	{
@@ -28,17 +29,17 @@ function legacySettingsPath(): string {
 	return path.join(getAgentDir(), "settings.json");
 }
 
-export function readHyperStatusItems(): HyperStatusItems {
+export function readHyperStatusItems(warn?: WarningSink): HyperStatusItems {
 	const settings = readSettingsObject();
 	const statusItems = property(settings, "statusItems");
 	if (statusItems !== undefined) {
 		return (
-			parseHyperStatusItems(statusItems, "statusItems in hyper-provider/settings.json") ??
-			readLegacyHyperStatusItems() ?? { ...DEFAULT_STATUS_ITEMS }
+			parseHyperStatusItems(statusItems, "statusItems in hyper-provider/settings.json", warn) ??
+			readLegacyHyperStatusItems(warn) ?? { ...DEFAULT_STATUS_ITEMS }
 		);
 	}
 
-	return readLegacyHyperStatusItems() ?? { ...DEFAULT_STATUS_ITEMS };
+	return readLegacyHyperStatusItems(warn) ?? { ...DEFAULT_STATUS_ITEMS };
 }
 
 export function writeHyperStatusItems(statusItems: HyperStatusItems): void {
@@ -49,7 +50,7 @@ export function writeHyperStatusItems(statusItems: HyperStatusItems): void {
 	writeFileSync(settingsPath(), `${JSON.stringify(settings, null, 2)}\n`, "utf-8");
 }
 
-export function migrateHyperSettings(): void {
+export function migrateHyperSettings(warn?: WarningSink): void {
 	const legacySettings = readSettingsObject(legacySettingsPath());
 	const legacyHyper = propertyObject(legacySettings, "hyper");
 	if (!legacyHyper) return;
@@ -57,11 +58,12 @@ export function migrateHyperSettings(): void {
 	const legacyStatusItems = parseHyperStatusItems(
 		property(legacyHyper, "statusItems"),
 		"hyper.statusItems in settings.json",
+		warn,
 	);
 	const settings = readSettingsObject();
 	const statusItems = property(settings, "statusItems");
 	let hasUsableStatusItems =
-		parseHyperStatusItems(statusItems, "statusItems in hyper-provider/settings.json") !== undefined;
+		parseHyperStatusItems(statusItems, "statusItems in hyper-provider/settings.json", warn) !== undefined;
 
 	if (statusItems === undefined && legacyStatusItems !== undefined) {
 		settings.statusItems = legacyStatusItems;
@@ -101,18 +103,18 @@ function removeLegacyHyperStatusItems(): void {
 	writeSettingsObject(legacySettingsPath(), legacySettings);
 }
 
-function readLegacyHyperStatusItems(): HyperStatusItems | undefined {
+function readLegacyHyperStatusItems(warn?: WarningSink): HyperStatusItems | undefined {
 	const legacySettings = readSettingsObject(legacySettingsPath());
 	const legacyHyper = propertyObject(legacySettings, "hyper");
 	return legacyHyper
-		? parseHyperStatusItems(property(legacyHyper, "statusItems"), "hyper.statusItems in settings.json")
+		? parseHyperStatusItems(property(legacyHyper, "statusItems"), "hyper.statusItems in settings.json", warn)
 		: undefined;
 }
 
-function parseHyperStatusItems(value: unknown, source: string): HyperStatusItems | undefined {
+function parseHyperStatusItems(value: unknown, source: string, warn?: WarningSink): HyperStatusItems | undefined {
 	if (value === undefined) return undefined;
 	if (!Value.Check(HyperStatusItemsSchema, value)) {
-		console.error(`Ignoring invalid ${source}`);
+		warn?.(`Ignoring invalid ${source}`);
 		return undefined;
 	}
 
