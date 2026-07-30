@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { fetchJson, HttpNetworkError, HttpResponseError, HttpTimeoutError } from "./http.js";
-import { hyperApiBaseUrl, hyperJsonHeaders, PROVIDER_NAME } from "./hyper.js";
+import { HYPER_API_BASE_URL, hyperJsonHeaders, PROVIDER_NAME } from "./hyper.js";
 import type { WarningSink } from "./notify.js";
 import { parseSchema } from "./schema.js";
 import {
@@ -26,7 +26,7 @@ const CreditsPayloadSchema = Type.Object(
 );
 
 async function fetchCredits(apiKey: string): Promise<number> {
-	const payload = await fetchJson(`${hyperApiBaseUrl()}/credits`, {
+	const payload = await fetchJson(`${HYPER_API_BASE_URL}/credits`, {
 		headers: hyperJsonHeaders({ Authorization: `Bearer ${apiKey}` }),
 		timeoutMs: CREDITS_FETCH_TIMEOUT_MS,
 	});

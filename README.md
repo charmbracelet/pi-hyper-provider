@@ -27,10 +27,11 @@ pi install git:github.com/charmbracelet/pi-hyper-provider
 Pick a Hyper model by sending `/model` and filtering by either provider name
 `hyper` or `model-name` like `glm-5.1`.
 
-Model info is fetched at startup and cached locally; the cache is used as a
-fallback when the Hyper provider catalog is unreachable. By default, your
-remaining Hypercredit balance is shown in the status line while a Hyper model is
-active.
+After Hyper credentials are configured, Pi discovers available models and
+persists the latest successful catalog in its standard model store. A previously
+discovered catalog remains available when a later refresh fails. By default,
+your remaining Hypercredit balance is shown in the status line while a Hyper
+model is active.
 
 Use `/hyper-status` to configure the status line interactively and toggle things
 on/off or reset to the defaults. `teamName` defaults to `false` and

@@ -3,7 +3,7 @@ import type { AuthInteraction, OAuthCredential } from "@earendil-works/pi-ai";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { fetchJson, fetchJsonResponse } from "./http.js";
-import { hyperBaseUrl, hyperJsonHeaders } from "./hyper.js";
+import { HYPER_BASE_URL, hyperJsonHeaders } from "./hyper.js";
 import { parseSchema } from "./schema.js";
 
 // Inlined from pi-ai (no longer publicly exported)
@@ -168,7 +168,7 @@ type TokenExchangeResponse =
 	| Static<typeof TokenExchangeWithExpiresAtSchema>;
 
 async function initiateDeviceAuth(signal?: AbortSignal): Promise<DeviceAuthResponse> {
-	const payload = await fetchJson(`${hyperBaseUrl()}/device/auth`, {
+	const payload = await fetchJson(`${HYPER_BASE_URL}/device/auth`, {
 		method: "POST",
 		headers: hyperJsonHeaders(),
 		body: JSON.stringify({ device_name: deviceName() }),
@@ -190,7 +190,7 @@ async function pollDeviceAuth(deviceAuth: DeviceAuthResponse, signal?: AbortSign
 		signal,
 		poll: async () => {
 			const response = await fetchJsonResponse(
-				`${hyperBaseUrl()}/device/auth/${encodeURIComponent(deviceAuth.device_code)}`,
+				`${HYPER_BASE_URL}/device/auth/${encodeURIComponent(deviceAuth.device_code)}`,
 				{
 					headers: hyperJsonHeaders(),
 					signal,
@@ -229,7 +229,7 @@ function parseDevicePollResponse(payload: unknown, source = "Hyper device token 
 }
 
 async function exchangeRefreshToken(refreshToken: string, signal?: AbortSignal): Promise<TokenExchangeResponse> {
-	const payload = await fetchJson(`${hyperBaseUrl()}/token/exchange`, {
+	const payload = await fetchJson(`${HYPER_BASE_URL}/token/exchange`, {
 		method: "POST",
 		headers: hyperJsonHeaders(),
 		body: JSON.stringify({ refresh_token: refreshToken }),
