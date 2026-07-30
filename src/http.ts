@@ -1,3 +1,25 @@
+import { STATUS_CODES } from "node:http";
+import { Type } from "typebox";
+import { Value } from "typebox/value";
+
+const OpenAIErrorPayloadSchema = Type.Object(
+	{
+		error: Type.Object(
+			{
+				message: Type.String({ minLength: 1 }),
+				type: Type.String({ minLength: 1 }),
+				code: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
+const MAX_ERROR_MESSAGE_CHARACTERS = 200;
+const SAFE_ERROR_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+const UNSAFE_ERROR_MESSAGE = /[<>\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+
 export interface FetchJsonOptions {
 	method?: RequestInit["method"];
 	headers?: RequestInit["headers"];
@@ -112,16 +134,16 @@ export async function fetchJsonResponse(url: string, options: FetchJsonOptions):
 			if (!response.ok && !options.allowHttpErrorPayload) {
 				throw new HttpResponseError(
 					response.status,
-					`${url} returned HTTP ${response.status}; response body could not be read`,
+					`${url} returned ${formatHttpStatus(response.status)}; response body could not be read`,
 				);
 			}
 			throw new HttpNetworkError(
-				`${url} returned HTTP ${response.status}; response body could not be read`,
+				`${url} returned ${formatHttpStatus(response.status)}; response body could not be read`,
 				error,
 			);
 		}
 		if (!response.ok && !options.allowHttpErrorPayload) {
-			throw new HttpResponseError(response.status, `${url} returned HTTP ${response.status}: ${summarizeBody(body)}`);
+			throw new HttpResponseError(response.status, formatHttpResponseError(url, response.status, body));
 		}
 		return {
 			status: response.status,
@@ -152,23 +174,48 @@ export async function fetchJsonResponse(url: string, options: FetchJsonOptions):
 
 function parseJsonBody(url: string, status: number, body: string): unknown {
 	if (!body.trim()) {
-		throw new HttpResponsePayloadError(status, `${url} returned HTTP ${status} with an empty JSON body`);
+		throw new HttpResponsePayloadError(status, `${url} returned ${formatHttpStatus(status)} with an empty JSON body`);
 	}
 	try {
 		return JSON.parse(body);
-	} catch (err) {
-		throw new HttpResponsePayloadError(
-			status,
-			`${url} returned invalid JSON (HTTP ${status}): ${summarizeBody(body)}`,
-			err,
-		);
+	} catch {
+		throw new HttpResponsePayloadError(status, `${url} returned invalid JSON (${formatHttpStatus(status)})`);
 	}
 }
 
-function summarizeBody(body: string): string {
-	const trimmed = body.trim();
-	if (!trimmed) return "empty response body";
-	const maxBodyCharacters = 2_000;
-	if (trimmed.length <= maxBodyCharacters) return trimmed;
-	return `${trimmed.slice(0, maxBodyCharacters)}…`;
+function formatHttpResponseError(url: string, status: number, body: string): string {
+	const prefix = `${url} returned ${formatHttpStatus(status)}`;
+	const detail = parseSafeOpenAIError(body);
+	return detail === undefined ? prefix : `${prefix}: ${detail}`;
+}
+
+function formatHttpStatus(status: number): string {
+	const reason = STATUS_CODES[status];
+	return reason === undefined ? `HTTP ${status}` : `HTTP ${status} ${reason}`;
+}
+
+function parseSafeOpenAIError(body: string): string | undefined {
+	let payload: unknown;
+	try {
+		payload = JSON.parse(body);
+	} catch {
+		return undefined;
+	}
+	if (!Value.Check(OpenAIErrorPayloadSchema, payload)) return undefined;
+
+	const parsed = payload.error;
+	if (!SAFE_ERROR_TOKEN.test(parsed.type)) return undefined;
+	if (parsed.code !== null && !SAFE_ERROR_TOKEN.test(parsed.code)) return undefined;
+	if (!isSafeErrorMessage(parsed.message)) return undefined;
+
+	const identity = parsed.code === null ? parsed.type : `${parsed.type}/${parsed.code}`;
+	return `${identity}: ${parsed.message}`;
+}
+
+function isSafeErrorMessage(message: string): boolean {
+	return (
+		message === message.trim() &&
+		Array.from(message).length <= MAX_ERROR_MESSAGE_CHARACTERS &&
+		!UNSAFE_ERROR_MESSAGE.test(message)
+	);
 }
