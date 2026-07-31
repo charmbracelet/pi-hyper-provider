@@ -2,7 +2,7 @@ import { hostname } from "node:os";
 import type { AuthInteraction, OAuthCredential } from "@earendil-works/pi-ai";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
-import { fetchJson, fetchJsonResponse } from "./http.js";
+import { fetchJson, fetchJsonResponse, HttpResponseError } from "./http.js";
 import { HYPER_BASE_URL, hyperJsonHeaders } from "./hyper.js";
 import { parseSchema } from "./schema.js";
 
@@ -160,12 +160,28 @@ const TokenExchangeWithExpiresAtSchema = Type.Object(
 
 const TokenExchangeResponseSchema = Type.Union([TokenExchangeWithExpiresInSchema, TokenExchangeWithExpiresAtSchema]);
 
+const RejectedRefreshTokenResponseSchema = Type.Object(
+	{
+		error: Type.Literal("could not get refresh token: not found"),
+	},
+	{ additionalProperties: false },
+);
+
 type DeviceAuthResponse = Static<typeof DeviceAuthResponseSchema>;
 type DevicePollResponse = Static<typeof DevicePollSuccessSchema> | Static<typeof DevicePollErrorSchema>;
 type DevicePollSuccess = Static<typeof DevicePollSuccessSchema>;
 type TokenExchangeResponse =
 	| Static<typeof TokenExchangeWithExpiresInSchema>
 	| Static<typeof TokenExchangeWithExpiresAtSchema>;
+
+class HyperRefreshTokenRejectedError extends Error {
+	readonly kind = "refresh_token_rejected";
+
+	constructor(cause: HttpResponseError) {
+		super("Your Hyper session is no longer valid. Run /login hyper to re-authenticate.", { cause });
+		this.name = "HyperRefreshTokenRejectedError";
+	}
+}
 
 async function initiateDeviceAuth(signal?: AbortSignal): Promise<DeviceAuthResponse> {
 	const payload = await fetchJson(`${HYPER_BASE_URL}/device/auth`, {
@@ -294,10 +310,26 @@ export async function loginHyper(interaction: AuthInteraction): Promise<OAuthCre
 }
 
 export async function refreshHyperToken(credential: OAuthCredential, signal?: AbortSignal): Promise<OAuthCredential> {
-	const token = await exchangeRefreshToken(credential.refresh, signal);
+	let token: TokenExchangeResponse;
+	try {
+		token = await exchangeRefreshToken(credential.refresh, signal);
+	} catch (error) {
+		if (isRejectedRefreshTokenResponse(error)) {
+			throw new HyperRefreshTokenRejectedError(error);
+		}
+		throw error;
+	}
 	return tokenToCredentials(token, credential.refresh, {
 		teamName: teamNameFromCredentials(credential),
 	});
+}
+
+function isRejectedRefreshTokenResponse(error: unknown): error is HttpResponseError {
+	return (
+		error instanceof HttpResponseError &&
+		error.status === 401 &&
+		error.matchesResponseJson(RejectedRefreshTokenResponseSchema)
+	);
 }
 
 function teamNameFromCredentials(credential: OAuthCredential): string | undefined {

@@ -1,5 +1,5 @@
 import { STATUS_CODES } from "node:http";
-import { Type } from "typebox";
+import { type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 
 const OpenAIErrorPayloadSchema = Type.Object(
@@ -35,15 +35,24 @@ export interface FetchJsonResponse {
 	payload: unknown;
 }
 
+type HttpResponseJson = { kind: "parsed"; value: unknown } | { kind: "unavailable" };
+
 export class HttpResponseError extends Error {
 	readonly kind = "http";
+	readonly #responseJson: HttpResponseJson;
 
 	constructor(
 		readonly status: number,
 		message: string,
+		responseJson: HttpResponseJson,
 	) {
 		super(message);
 		this.name = "HttpResponseError";
+		this.#responseJson = responseJson;
+	}
+
+	matchesResponseJson(schema: TSchema): boolean {
+		return this.#responseJson.kind === "parsed" && Value.Check(schema, this.#responseJson.value);
 	}
 }
 
@@ -135,6 +144,7 @@ export async function fetchJsonResponse(url: string, options: FetchJsonOptions):
 				throw new HttpResponseError(
 					response.status,
 					`${url} returned ${formatHttpStatus(response.status)}; response body could not be read`,
+					{ kind: "unavailable" },
 				);
 			}
 			throw new HttpNetworkError(
@@ -143,7 +153,12 @@ export async function fetchJsonResponse(url: string, options: FetchJsonOptions):
 			);
 		}
 		if (!response.ok && !options.allowHttpErrorPayload) {
-			throw new HttpResponseError(response.status, formatHttpResponseError(url, response.status, body));
+			const responseJson = parseHttpResponseJson(body);
+			throw new HttpResponseError(
+				response.status,
+				formatHttpResponseError(url, response.status, responseJson),
+				responseJson,
+			);
 		}
 		return {
 			status: response.status,
@@ -183,9 +198,17 @@ function parseJsonBody(url: string, status: number, body: string): unknown {
 	}
 }
 
-function formatHttpResponseError(url: string, status: number, body: string): string {
+function parseHttpResponseJson(body: string): HttpResponseJson {
+	try {
+		return { kind: "parsed", value: JSON.parse(body) };
+	} catch {
+		return { kind: "unavailable" };
+	}
+}
+
+function formatHttpResponseError(url: string, status: number, responseJson: HttpResponseJson): string {
 	const prefix = `${url} returned ${formatHttpStatus(status)}`;
-	const detail = parseSafeOpenAIError(body);
+	const detail = responseJson.kind === "parsed" ? parseSafeOpenAIError(responseJson.value) : undefined;
 	return detail === undefined ? prefix : `${prefix}: ${detail}`;
 }
 
@@ -194,13 +217,7 @@ function formatHttpStatus(status: number): string {
 	return reason === undefined ? `HTTP ${status}` : `HTTP ${status} ${reason}`;
 }
 
-function parseSafeOpenAIError(body: string): string | undefined {
-	let payload: unknown;
-	try {
-		payload = JSON.parse(body);
-	} catch {
-		return undefined;
-	}
+function parseSafeOpenAIError(payload: unknown): string | undefined {
 	if (!Value.Check(OpenAIErrorPayloadSchema, payload)) return undefined;
 
 	const parsed = payload.error;
