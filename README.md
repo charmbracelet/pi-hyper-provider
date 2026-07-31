@@ -17,6 +17,15 @@ pi install npm:@charmland/pi-hyper-provider
 pi install git:github.com/charmbracelet/pi-hyper-provider
 ```
 
+> [!IMPORTANT]
+> As of v83, Pi only creates and updates provider extensions' model caches when
+> launched interactively. If you always use the Pi TUI, you'll be fine. If you
+> mostly use Pi in headless or non-interactive
+> environments, or from another app that relies on Pi's RPC mode, you may prefer
+> to [copy the generated config from our
+> docs](https://hyper.charm.land/docs/coding-agents/pi.html) instead of using
+> the extension.
+
 ## Usage
 
 - To authenticate with OAuth, open `pi`, send `/login`, pick `Subscription`, and select the
