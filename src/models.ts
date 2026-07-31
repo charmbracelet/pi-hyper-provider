@@ -14,15 +14,18 @@ const PI_THINKING_LEVELS = [
 	"xhigh",
 	"max",
 ] as const satisfies readonly ThinkingLevel[];
-// Hyper models without reasoning levels are on/off-only. Use Pi's medium level
-// as the single representative "on" state; it is not sent as reasoning_effort.
+// Hyper models without reasoning levels are on/off-only. Use Pi's max level as
+// the single representative "on" state (boolean on means maximum effort); the
+// deepseek compat switch we turn on later ends up dropping efforts and
+// translating off as disabled and any other level as enabled.
 const ON_OFF_THINKING_LEVEL_MAP: ThinkingLevelMap = {
 	off: "off",
 	minimal: null,
 	low: null,
-	medium: "medium",
+	medium: null,
 	high: null,
 	xhigh: null,
+	max: "max",
 };
 
 const ProviderModelSchema = Type.Object(
