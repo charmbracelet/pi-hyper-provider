@@ -8,6 +8,7 @@ import { parseSchema } from "./schema.js";
 import {
 	defaultHyperStatusItems,
 	type HyperStatusItems,
+	migrateHyperSettings,
 	readHyperStatusItems,
 	writeHyperStatusItems,
 } from "./settings.js";
@@ -62,13 +63,17 @@ function storedTeamName(): string | undefined {
 
 export interface CreditStatusRuntime {
 	handleCommand(args: string, ctx: ExtensionCommandContext): Promise<void>;
-	onSessionStart(ctx: ExtensionContext): void;
-	onModelSelect(model: ExtensionContext["model"], ctx: ExtensionContext): void;
-	onMessageEnd(role: string, ctx: ExtensionContext): void;
+	refresh(ctx: ExtensionContext, selectedModel: ExtensionContext["model"]): Promise<void>;
 	dispose(): void;
 }
 
 export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntime {
+	try {
+		migrateHyperSettings(warn);
+	} catch (error) {
+		warn(`Failed to migrate Hyper settings: ${String(error)}`);
+	}
+
 	let invocationSequence = 0;
 	let committedInvocation = 0;
 	let credentialEpoch = 0;
@@ -98,6 +103,10 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 
 	function ownsCredential(lease: CredentialLease): boolean {
 		return lease.apiKey === currentApiKey && lease.credentialEpoch === credentialEpoch;
+	}
+
+	function canRender(invocation: number, forcedLease: CredentialLease | undefined): boolean {
+		return invocation === invocationSequence || (forcedLease !== undefined && ownsCredential(forcedLease));
 	}
 
 	function render(ctx: ExtensionContext, lease: CredentialLease): void {
@@ -152,7 +161,7 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 		}
 	}
 
-	async function refresh(
+	async function refreshStatus(
 		ctx: ExtensionContext,
 		selectedModel: ExtensionContext["model"] = ctx.model,
 		isUserRequested = false,
@@ -213,9 +222,11 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 			failureLease = lease;
 			await shareFetch(auth.apiKey, expectedCredentialEpoch);
 			if (disposed) return;
+			if (!canRender(invocation, forcedLease)) return;
 			render(ctx, lease);
 		} catch {
 			if (disposed) return;
+			if (!canRender(invocation, forcedLease)) return;
 			const failedOperationStillOwnsCredential = failureLease !== undefined && ownsCredential(failureLease);
 			if (failureLease !== undefined && failedOperationStillOwnsCredential) render(ctx, failureLease);
 			if (
@@ -225,11 +236,6 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 				ctx.ui.notify("Unable to refresh Hypercredit balance", "warning");
 			}
 		}
-	}
-
-	function refreshInBackground(ctx: ExtensionContext, selectedModel: ExtensionContext["model"] = ctx.model): void {
-		if (disposed || !ctx.hasUI) return;
-		void refresh(ctx, selectedModel).catch(() => undefined);
 	}
 
 	return {
@@ -243,28 +249,18 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 
 				const changed = await configureStatusItems(ctx, warn, () => disposed);
 				if (disposed) return;
-				if (changed) await refresh(ctx, ctx.model, true);
+				if (changed) await refreshStatus(ctx, ctx.model, true);
 				return;
 			}
 
 			const result = updateStatusItems(args, warn);
 			if (disposed) return;
 			ctx.ui.notify(result.message, "info");
-			if (result.kind === "changed") await refresh(ctx, ctx.model, true);
+			if (result.kind === "changed") await refreshStatus(ctx, ctx.model, true);
 		},
 
-		onSessionStart(ctx) {
-			refreshInBackground(ctx);
-		},
-
-		onModelSelect(model, ctx) {
-			refreshInBackground(ctx, model);
-		},
-
-		onMessageEnd(role, ctx) {
-			if (role === "assistant" && isHyperModel(ctx.model)) {
-				refreshInBackground(ctx);
-			}
+		refresh(ctx, selectedModel) {
+			return refreshStatus(ctx, selectedModel);
 		},
 
 		dispose() {
