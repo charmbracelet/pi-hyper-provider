@@ -1,11 +1,9 @@
-import { createProvider, envApiKeyAuth } from "@earendil-works/pi-ai";
+import { createProvider, envApiKeyAuth, lazyOAuth, type OAuthAuth } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerCreditStatus } from "./credits.js";
 import { HYPER_API_BASE_URL, PROVIDER_DISPLAY_NAME, PROVIDER_NAME } from "./hyper.js";
-import { fetchHyperModels } from "./models.js";
 import { createNotifier } from "./notify.js";
-import { loginHyper, refreshHyperToken } from "./oauth.js";
 import { migrateHyperSettings } from "./settings.js";
 
 export default function (pi: ExtensionAPI) {
@@ -27,15 +25,24 @@ export default function (pi: ExtensionAPI) {
 			baseUrl: HYPER_API_BASE_URL,
 			auth: {
 				apiKey: envApiKeyAuth("Hyper API key", ["HYPER_API_KEY"]),
-				oauth: {
+				oauth: lazyOAuth({
 					name: PROVIDER_DISPLAY_NAME,
-					login: loginHyper,
-					refresh: refreshHyperToken,
-					toAuth: async (credential) => ({ apiKey: credential.access }),
-				},
+					load: async () => {
+						const { loginHyper, refreshHyperToken } = await import("./oauth.js");
+						return {
+							name: PROVIDER_DISPLAY_NAME,
+							login: loginHyper,
+							refresh: refreshHyperToken,
+							toAuth: async (credential) => ({ apiKey: credential.access }),
+						} satisfies OAuthAuth;
+					},
+				}),
 			},
 			models: [],
-			fetchModels: ({ signal }) => fetchHyperModels(signal),
+			fetchModels: async ({ signal }) => {
+				const { fetchHyperModels } = await import("./models.js");
+				return fetchHyperModels(signal);
+			},
 			api: openAICompletionsApi(),
 		}),
 	);
