@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { fetchJson, HttpNetworkError, HttpResponseError, HttpTimeoutError } from "./http.js";
@@ -60,7 +60,15 @@ function storedTeamName(): string | undefined {
 	return typeof teamName === "string" && teamName.trim() ? teamName : undefined;
 }
 
-export function registerCreditStatus(pi: ExtensionAPI, warn: WarningSink): void {
+export interface CreditStatusRuntime {
+	handleCommand(args: string, ctx: ExtensionCommandContext): Promise<void>;
+	onSessionStart(ctx: ExtensionContext): void;
+	onModelSelect(model: ExtensionContext["model"], ctx: ExtensionContext): void;
+	onMessageEnd(role: string, ctx: ExtensionContext): void;
+	dispose(): void;
+}
+
+export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntime {
 	let invocationSequence = 0;
 	let committedInvocation = 0;
 	let credentialEpoch = 0;
@@ -69,6 +77,7 @@ export function registerCreditStatus(pi: ExtensionAPI, warn: WarningSink): void 
 	let currentApiKey: string | undefined;
 	let cachedBalance: number | undefined;
 	let inFlight: { apiKey: string; credentialEpoch: number; operation: Promise<void> } | undefined;
+	let disposed = false;
 	type CredentialLease = { apiKey: string; credentialEpoch: number };
 
 	function clearCreditState(): void {
@@ -148,6 +157,7 @@ export function registerCreditStatus(pi: ExtensionAPI, warn: WarningSink): void 
 		selectedModel: ExtensionContext["model"] = ctx.model,
 		isUserRequested = false,
 	): Promise<void> {
+		if (disposed) return;
 		const invocation = invocationSequence + 1;
 		invocationSequence = invocation;
 		const forcedLease: CredentialLease | undefined =
@@ -173,6 +183,7 @@ export function registerCreditStatus(pi: ExtensionAPI, warn: WarningSink): void 
 		renderStatus(ctx);
 		try {
 			const auth = await ctx.modelRegistry.getApiKeyAndHeaders(selectedModel);
+			if (disposed) return;
 			const forcedLeaseStillValid =
 				forcedLease !== undefined && auth.ok && auth.apiKey === forcedLease.apiKey && ownsCredential(forcedLease);
 			if (invocation < committedInvocation && !forcedLeaseStillValid) return;
@@ -201,8 +212,10 @@ export function registerCreditStatus(pi: ExtensionAPI, warn: WarningSink): void 
 			const lease = { apiKey: auth.apiKey, credentialEpoch: expectedCredentialEpoch };
 			failureLease = lease;
 			await shareFetch(auth.apiKey, expectedCredentialEpoch);
+			if (disposed) return;
 			render(ctx, lease);
 		} catch {
+			if (disposed) return;
 			const failedOperationStillOwnsCredential = failureLease !== undefined && ownsCredential(failureLease);
 			if (failureLease !== undefined && failedOperationStillOwnsCredential) render(ctx, failureLease);
 			if (
@@ -215,46 +228,59 @@ export function registerCreditStatus(pi: ExtensionAPI, warn: WarningSink): void 
 	}
 
 	function refreshInBackground(ctx: ExtensionContext, selectedModel: ExtensionContext["model"] = ctx.model): void {
-		if (!ctx.hasUI) return;
+		if (disposed || !ctx.hasUI) return;
 		void refresh(ctx, selectedModel).catch(() => undefined);
 	}
 
-	pi.registerCommand("hyper-status", {
-		description: "Configure the Charm Hyper footer status",
-		handler: async (args, ctx) => {
+	return {
+		async handleCommand(args, ctx) {
+			if (disposed) return;
 			if (!args.trim()) {
 				if (!ctx.hasUI) {
 					ctx.ui.notify(statusItemsSummary(readHyperStatusItems(warn)), "info");
 					return;
 				}
 
-				const changed = await configureStatusItems(ctx, warn);
+				const changed = await configureStatusItems(ctx, warn, () => disposed);
+				if (disposed) return;
 				if (changed) await refresh(ctx, ctx.model, true);
 				return;
 			}
 
 			const result = updateStatusItems(args, warn);
+			if (disposed) return;
 			ctx.ui.notify(result.message, "info");
 			if (result.kind === "changed") await refresh(ctx, ctx.model, true);
 		},
-	});
 
-	pi.on("session_start", (_event, ctx) => {
-		refreshInBackground(ctx);
-	});
-
-	pi.on("model_select", (event, ctx) => {
-		refreshInBackground(ctx, event.model);
-	});
-
-	pi.on("message_end", (event, ctx) => {
-		if (event.message.role === "assistant" && isHyperModel(ctx.model)) {
+		onSessionStart(ctx) {
 			refreshInBackground(ctx);
-		}
-	});
+		},
+
+		onModelSelect(model, ctx) {
+			refreshInBackground(ctx, model);
+		},
+
+		onMessageEnd(role, ctx) {
+			if (role === "assistant" && isHyperModel(ctx.model)) {
+				refreshInBackground(ctx);
+			}
+		},
+
+		dispose() {
+			if (disposed) return;
+			disposed = true;
+			committedInvocation = ++invocationSequence;
+			credentialEpoch += 1;
+		},
+	};
 }
 
-async function configureStatusItems(ctx: ExtensionContext, warn: (message: string) => void): Promise<boolean> {
+async function configureStatusItems(
+	ctx: ExtensionContext,
+	warn: (message: string) => void,
+	isDisposed: () => boolean,
+): Promise<boolean> {
 	const initial = readHyperStatusItems(warn);
 	let draft: HyperStatusItems = { ...initial };
 
@@ -272,6 +298,7 @@ async function configureStatusItems(ctx: ExtensionContext, warn: (message: strin
 			saveOption,
 			cancelOption,
 		]);
+		if (isDisposed()) return false;
 
 		if (choice === undefined || choice === cancelOption) {
 			ctx.ui.notify("Hyper status settings unchanged", "info");
@@ -296,11 +323,13 @@ async function configureStatusItems(ctx: ExtensionContext, warn: (message: strin
 			}
 
 			const ok = await ctx.ui.confirm("Save Hyper status settings?", statusItemsSummary(draft));
+			if (isDisposed()) return false;
 			if (!ok) {
 				ctx.ui.notify("Hyper status settings unchanged", "info");
 				return false;
 			}
 
+			if (isDisposed()) return false;
 			writeHyperStatusItems(draft);
 			ctx.ui.notify(`Hyper status updated. ${statusItemsSummary(draft)}`, "info");
 			return true;
