@@ -1,7 +1,7 @@
 import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { fetchJson, HttpNetworkError, HttpResponseError, HttpTimeoutError } from "./http.js";
+import * as httpClient from "./http.js";
 import { HYPER_API_BASE_URL, hyperJsonHeaders, PROVIDER_NAME } from "./hyper.js";
 import type { WarningSink } from "./notify.js";
 import { parseSchema } from "./schema.js";
@@ -26,12 +26,22 @@ const CreditsPayloadSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
-async function fetchCredits(apiKey: string): Promise<number> {
-	const payload = await fetchJson(`${HYPER_API_BASE_URL}/credits`, {
+async function fetchCredits(apiKey: string, signal: AbortSignal): Promise<number> {
+	const payload = await httpClient.fetchJson(`${HYPER_API_BASE_URL}/credits`, {
 		headers: hyperJsonHeaders({ Authorization: `Bearer ${apiKey}` }),
+		signal,
 		timeoutMs: CREDITS_FETCH_TIMEOUT_MS,
 	});
 	return parseSchema(CreditsPayloadSchema, payload, "Hyper /credits response").balance;
+}
+
+function isTransientCreditError(error: unknown): boolean {
+	return (
+		error instanceof httpClient.HttpNetworkError ||
+		error instanceof httpClient.HttpTimeoutError ||
+		(error instanceof httpClient.HttpResponseError &&
+			(error.status === 408 || error.status === 429 || (error.status >= 500 && error.status <= 599)))
+	);
 }
 
 function formatCredits(balance: number): string {
@@ -81,7 +91,9 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 	let retryAfterMs = 0;
 	let currentApiKey: string | undefined;
 	let cachedBalance: number | undefined;
-	let inFlight: { apiKey: string; credentialEpoch: number; operation: Promise<void> } | undefined;
+	let inFlight:
+		| { apiKey: string; credentialEpoch: number; controller: AbortController; operation: Promise<void> }
+		| undefined;
 	let disposed = false;
 	type CredentialLease = { apiKey: string; credentialEpoch: number };
 
@@ -89,6 +101,11 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 		cachedBalance = undefined;
 		consecutiveFailures = 0;
 		retryAfterMs = 0;
+	}
+
+	function invalidateCredential(): void {
+		credentialEpoch += 1;
+		inFlight?.controller.abort();
 	}
 
 	function renderStatus(ctx: ExtensionContext): void {
@@ -110,21 +127,16 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 		renderStatus(ctx);
 	}
 
-	async function fetchAndCache(apiKey: string, expectedCredentialEpoch: number): Promise<void> {
+	async function fetchAndCache(lease: CredentialLease, signal: AbortSignal): Promise<void> {
 		try {
-			const balance = await fetchCredits(apiKey);
-			if (credentialEpoch !== expectedCredentialEpoch || currentApiKey !== apiKey) return;
+			const balance = await fetchCredits(lease.apiKey, signal);
+			if (disposed || !ownsCredential(lease)) return;
 			cachedBalance = balance;
 			consecutiveFailures = 0;
 			retryAfterMs = 0;
 		} catch (error) {
-			if (credentialEpoch !== expectedCredentialEpoch || currentApiKey !== apiKey) throw error;
-			const transient =
-				error instanceof HttpNetworkError ||
-				error instanceof HttpTimeoutError ||
-				(error instanceof HttpResponseError &&
-					(error.status === 408 || error.status === 429 || (error.status >= 500 && error.status <= 599)));
-			if (!transient) {
+			if (disposed || !ownsCredential(lease)) throw error;
+			if (!isTransientCreditError(error)) {
 				clearCreditState();
 				throw error;
 			}
@@ -145,8 +157,9 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 			return;
 		}
 
-		const operation = fetchAndCache(apiKey, expectedCredentialEpoch);
-		const started = { apiKey, credentialEpoch: expectedCredentialEpoch, operation };
+		const controller = new AbortController();
+		const operation = fetchAndCache({ apiKey, credentialEpoch: expectedCredentialEpoch }, controller.signal);
+		const started = { apiKey, credentialEpoch: expectedCredentialEpoch, controller, operation };
 		inFlight = started;
 		try {
 			await operation;
@@ -170,7 +183,7 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 		let failureLease: CredentialLease | undefined;
 		if (!isHyperModel(selectedModel)) {
 			committedInvocation = invocation;
-			credentialEpoch += 1;
+			invalidateCredential();
 			ctx.ui.setStatus(PROVIDER_NAME, undefined);
 			return;
 		}
@@ -178,7 +191,7 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 		const statusItems = readHyperStatusItems(warn);
 		if (!statusItems.hypercredits) {
 			committedInvocation = invocation;
-			credentialEpoch += 1;
+			invalidateCredential();
 			renderStatus(ctx);
 			return;
 		}
@@ -194,7 +207,7 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 			if (invocation < committedInvocation && !forcedLeaseStillValid) return;
 			if (!auth.ok || !auth.apiKey) {
 				committedInvocation = invocation;
-				credentialEpoch += 1;
+				invalidateCredential();
 				currentApiKey = undefined;
 				clearCreditState();
 				renderStatus(ctx);
@@ -208,7 +221,7 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 			}
 			if (currentApiKey !== auth.apiKey) {
 				currentApiKey = auth.apiKey;
-				credentialEpoch += 1;
+				invalidateCredential();
 				clearCreditState();
 				// Never show the previous account while the replacement request runs.
 				renderStatus(ctx);
@@ -261,7 +274,7 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 			if (disposed) return;
 			disposed = true;
 			committedInvocation = ++invocationSequence;
-			credentialEpoch += 1;
+			invalidateCredential();
 		},
 	};
 }
