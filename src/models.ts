@@ -78,10 +78,8 @@ function toProviderModel(model: ProviderModel): Model<"openai-completions"> {
 		cost: {
 			input: model.cost_per_1m_in,
 			output: model.cost_per_1m_out,
-			cacheRead: model.cost_per_1m_in_cached,
-			// Hyper exposes cached input/output prices, but Pi only models cached
-			// input reads and cache writes. Hyper does not expose a cache-write price.
-			cacheWrite: 0,
+			cacheRead: model.cost_per_1m_out_cached ?? model.cost_per_1m_in_cached,
+			cacheWrite: model.cost_per_1m_in_cached,
 		},
 		contextWindow: model.context_window,
 		maxTokens: model.default_max_tokens,
