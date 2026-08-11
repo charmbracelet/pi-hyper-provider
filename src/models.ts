@@ -105,10 +105,10 @@ function buildThinkingLevelMap(levels: string[]): ThinkingLevelMap | undefined {
 }
 
 export async function fetchHyperModels(signal?: AbortSignal): Promise<Model<"openai-completions">[]> {
-	const payload = await fetchJson(`${HYPER_API_BASE_URL}/provider`, {
+	const payload = await fetchJson(`${HYPER_API_BASE_URL}/models`, {
 		signal,
 		timeoutMs: MODEL_FETCH_TIMEOUT_MS,
 	});
-	const provider = parseSchema(ProviderPayloadSchema, payload, "Hyper /provider response");
+	const provider = parseSchema(ProviderPayloadSchema, payload, "Hyper /models response");
 	return provider.models.map(toProviderModel);
 }
