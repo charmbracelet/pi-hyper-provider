@@ -78,7 +78,7 @@ function toProviderModel(model: ProviderModel): Model<"openai-completions"> {
 		cost: {
 			input: model.cost_per_1m_in,
 			output: model.cost_per_1m_out,
-			cacheRead: model.cost_per_1m_out_cached ?? model.cost_per_1m_in_cached,
+			cacheRead: model.cost_per_1m_out_cached,
 			cacheWrite: model.cost_per_1m_in_cached,
 		},
 		contextWindow: model.context_window,
