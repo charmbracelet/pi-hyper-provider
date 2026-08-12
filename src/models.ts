@@ -78,7 +78,7 @@ function toProviderModel(model: ProviderModel): Model<"openai-completions"> {
 		cost: {
 			input: model.cost_per_1m_in,
 			output: model.cost_per_1m_out,
-			cacheRead: model.cost_per_1m_out_cached,
+			cacheRead: model.cost_per_1m_out_cached ?? 0,
 			cacheWrite: model.cost_per_1m_in_cached,
 		},
 		contextWindow: model.context_window,
@@ -95,8 +95,9 @@ function toProviderModel(model: ProviderModel): Model<"openai-completions"> {
 function buildThinkingLevelMap(levels: string[]): ThinkingLevelMap | undefined {
 	if (levels.length === 0) return undefined;
 	const availableLevels = new Set<string>(levels);
+	const disabledReasoningLevel = levels.find((level) => level === "off" || level === "none") ?? null;
 	const result: ThinkingLevelMap = {
-		off: availableLevels.has("off") ? "off" : null,
+		off: disabledReasoningLevel,
 	};
 	for (const level of PI_THINKING_LEVELS) {
 		result[level] = availableLevels.has(level) ? level : null;
