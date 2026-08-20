@@ -106,43 +106,28 @@ export async function fetchJson(url: string, options: FetchJsonOptions): Promise
 }
 
 export async function fetchJsonResponse(url: string, options: FetchJsonOptions): Promise<FetchJsonResponse> {
-	const controller = new AbortController();
-	let timedOut = false;
-	let callerAborted = false;
-	const timeout = setTimeout(() => {
-		timedOut = true;
-		controller.abort();
-	}, options.timeoutMs);
-	const abortFromCaller = () => {
-		callerAborted = true;
-		controller.abort();
-	};
-	if (options.signal?.aborted) {
-		callerAborted = true;
-		controller.abort();
-	} else {
-		options.signal?.addEventListener("abort", abortFromCaller, { once: true });
-	}
+	const timeoutSignal = AbortSignal.timeout(options.timeoutMs);
+	const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
 
 	try {
 		const response = await fetch(url, {
 			method: options.method,
 			headers: options.headers,
 			body: options.body,
-			signal: controller.signal,
+			signal,
 		});
 		let body: string;
 		try {
 			body = await response.text();
 		} catch (error) {
-			if (timedOut) {
+			if (abortedBy(signal, timeoutSignal)) {
 				throw new HttpResponseTimeoutError(
 					response.status,
 					`${url} timed out after ${options.timeoutMs}ms while reading HTTP ${response.status} response body`,
 					error,
 				);
 			}
-			if (callerAborted) throw error;
+			if (options.signal && abortedBy(signal, options.signal)) throw error;
 			if (!response.ok && !options.allowHttpErrorPayload) {
 				throw new HttpResponseError(
 					response.status,
@@ -169,6 +154,9 @@ export async function fetchJsonResponse(url: string, options: FetchJsonOptions):
 			payload: parseJsonBody(url, response.status, body),
 		};
 	} catch (err) {
+		if (options.signal && abortedBy(signal, options.signal) && err === options.signal.reason) {
+			throw new Error(`${url} request was aborted`, { cause: err });
+		}
 		if (
 			err instanceof HttpResponseError ||
 			err instanceof HttpResponsePayloadError ||
@@ -177,17 +165,18 @@ export async function fetchJsonResponse(url: string, options: FetchJsonOptions):
 		) {
 			throw err;
 		}
-		if (timedOut) {
+		if (abortedBy(signal, timeoutSignal)) {
 			throw new HttpTimeoutError(`${url} timed out after ${options.timeoutMs}ms`, err);
 		}
-		if (callerAborted) {
+		if (options.signal && abortedBy(signal, options.signal)) {
 			throw new Error(`${url} request was aborted`, { cause: err });
 		}
 		throw new HttpNetworkError(`${url} request failed`, err);
-	} finally {
-		clearTimeout(timeout);
-		options.signal?.removeEventListener("abort", abortFromCaller);
 	}
+}
+
+function abortedBy(signal: AbortSignal, source: AbortSignal): boolean {
+	return signal.aborted && source.aborted && signal.reason === source.reason;
 }
 
 function parseJsonBody(url: string, status: number, body: string): unknown {
