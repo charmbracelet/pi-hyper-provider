@@ -2,7 +2,7 @@ import { hostname } from "node:os";
 import type { AuthInteraction, OAuthCredential } from "@earendil-works/pi-ai";
 import { type Static, Type } from "typebox";
 import { Compile } from "typebox/compile";
-import { fetchJson, fetchJsonResponse, HttpResponseError } from "./http.js";
+import { fetchJson, HttpResponseError } from "./http.js";
 import { HYPER_BASE_URL, hyperJsonHeaders } from "./hyper.js";
 import { parseSchema } from "./schema.js";
 
@@ -58,6 +58,10 @@ async function pollOAuthDeviceCodeFlow<T>(options: {
 	);
 
 	let slowDownResponses = 0;
+	const initialRemainingMs = deadline - Date.now();
+	if (initialRemainingMs > 0) {
+		await abortableSleep(Math.min(intervalMs, initialRemainingMs), options.signal, CANCEL_MESSAGE);
+	}
 
 	while (Date.now() < deadline) {
 		if (options.signal?.aborted) {
@@ -213,19 +217,12 @@ async function pollDeviceAuth(deviceAuth: DeviceAuthResponse, signal?: AbortSign
 		expiresInSeconds: deviceAuth.expires_in,
 		signal,
 		poll: async () => {
-			const response = await fetchJsonResponse(
-				`${HYPER_BASE_URL}/device/auth/${encodeURIComponent(deviceAuth.device_code)}`,
-				{
-					headers: hyperJsonHeaders(),
-					signal,
-					timeoutMs: OAUTH_FETCH_TIMEOUT_MS,
-					allowHttpErrorPayload: true,
-				},
-			);
-			const pollResponse = parseDevicePollResponse(
-				response.payload,
-				`Hyper device token response (HTTP ${response.status})`,
-			);
+			const payload = await fetchJson(`${HYPER_BASE_URL}/device/auth/${encodeURIComponent(deviceAuth.device_code)}`, {
+				headers: hyperJsonHeaders(),
+				signal,
+				timeoutMs: OAUTH_FETCH_TIMEOUT_MS,
+			});
+			const pollResponse = parseDevicePollResponse(payload);
 
 			if ("refresh_token" in pollResponse) {
 				return { status: "complete", value: pollResponse };
