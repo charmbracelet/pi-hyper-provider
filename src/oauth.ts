@@ -1,7 +1,7 @@
 import { hostname } from "node:os";
 import type { AuthInteraction, OAuthCredential } from "@earendil-works/pi-ai";
 import { type Static, Type } from "typebox";
-import { Value } from "typebox/value";
+import { Compile } from "typebox/compile";
 import { fetchJson, fetchJsonResponse, HttpResponseError } from "./http.js";
 import { HYPER_BASE_URL, hyperJsonHeaders } from "./hyper.js";
 import { parseSchema } from "./schema.js";
@@ -166,6 +166,14 @@ const RejectedRefreshTokenResponseSchema = Type.Object(
 	},
 	{ additionalProperties: false },
 );
+const DeviceAuthResponseValidator = Compile(DeviceAuthResponseSchema);
+const DevicePollSuccessValidator = Compile(DevicePollSuccessSchema);
+const DevicePollErrorValidator = Compile(DevicePollErrorSchema);
+const DevicePollResponseValidator = Compile(DevicePollResponseSchema);
+const TokenExchangeWithExpiresInValidator = Compile(TokenExchangeWithExpiresInSchema);
+const TokenExchangeWithExpiresAtValidator = Compile(TokenExchangeWithExpiresAtSchema);
+const TokenExchangeResponseValidator = Compile(TokenExchangeResponseSchema);
+const RejectedRefreshTokenResponseValidator = Compile(RejectedRefreshTokenResponseSchema);
 
 type DeviceAuthResponse = Static<typeof DeviceAuthResponseSchema>;
 type DevicePollResponse = Static<typeof DevicePollSuccessSchema> | Static<typeof DevicePollErrorSchema>;
@@ -191,7 +199,7 @@ async function initiateDeviceAuth(signal?: AbortSignal): Promise<DeviceAuthRespo
 		signal,
 		timeoutMs: OAUTH_FETCH_TIMEOUT_MS,
 	});
-	return parseSchema(DeviceAuthResponseSchema, payload, "Hyper device auth response");
+	return parseSchema(DeviceAuthResponseValidator, payload, "Hyper device auth response");
 }
 
 function deviceName(): string {
@@ -234,13 +242,9 @@ async function pollDeviceAuth(deviceAuth: DeviceAuthResponse, signal?: AbortSign
 }
 
 function parseDevicePollResponse(payload: unknown, source = "Hyper device token response"): DevicePollResponse {
-	if (Value.Check(DevicePollSuccessSchema, payload)) {
-		return Value.Parse(DevicePollSuccessSchema, payload);
-	}
-	if (Value.Check(DevicePollErrorSchema, payload)) {
-		return Value.Parse(DevicePollErrorSchema, payload);
-	}
-	parseSchema(DevicePollResponseSchema, payload, source);
+	if (DevicePollSuccessValidator.Check(payload)) return payload;
+	if (DevicePollErrorValidator.Check(payload)) return payload;
+	parseSchema(DevicePollResponseValidator, payload, source);
 	throw new Error("Hyper device token response is invalid");
 }
 
@@ -256,13 +260,9 @@ async function exchangeRefreshToken(refreshToken: string, signal?: AbortSignal):
 }
 
 function parseTokenExchangeResponse(payload: unknown): TokenExchangeResponse {
-	if (Value.Check(TokenExchangeWithExpiresInSchema, payload)) {
-		return Value.Parse(TokenExchangeWithExpiresInSchema, payload);
-	}
-	if (Value.Check(TokenExchangeWithExpiresAtSchema, payload)) {
-		return Value.Parse(TokenExchangeWithExpiresAtSchema, payload);
-	}
-	parseSchema(TokenExchangeResponseSchema, payload, "Hyper token exchange response");
+	if (TokenExchangeWithExpiresInValidator.Check(payload)) return payload;
+	if (TokenExchangeWithExpiresAtValidator.Check(payload)) return payload;
+	parseSchema(TokenExchangeResponseValidator, payload, "Hyper token exchange response");
 	throw new Error("Hyper token exchange response is invalid");
 }
 
@@ -328,7 +328,7 @@ function isRejectedRefreshTokenResponse(error: unknown): error is HttpResponseEr
 	return (
 		error instanceof HttpResponseError &&
 		error.status === 401 &&
-		error.matchesResponseJson(RejectedRefreshTokenResponseSchema)
+		error.matchesResponseJson(RejectedRefreshTokenResponseValidator)
 	);
 }
 

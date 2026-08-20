@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
-import { Value } from "typebox/value";
+import { Compile } from "typebox/compile";
 import { hyperProviderDir } from "./hyper.js";
 import type { WarningSink } from "./notify.js";
 
@@ -13,6 +13,7 @@ const HyperStatusItemsSchema = Type.Object(
 	},
 	{ additionalProperties: false },
 );
+const HyperStatusItemsValidator = Compile(HyperStatusItemsSchema);
 
 export type HyperStatusItems = Required<Static<typeof HyperStatusItemsSchema>>;
 
@@ -113,14 +114,14 @@ function readLegacyHyperStatusItems(warn?: WarningSink): HyperStatusItems | unde
 
 function parseHyperStatusItems(value: unknown, source: string, warn?: WarningSink): HyperStatusItems | undefined {
 	if (value === undefined) return undefined;
-	if (!Value.Check(HyperStatusItemsSchema, value)) {
+	if (!HyperStatusItemsValidator.Check(value)) {
 		warn?.(`Ignoring invalid ${source}`);
 		return undefined;
 	}
 
 	return {
 		...DEFAULT_STATUS_ITEMS,
-		...Value.Parse(HyperStatusItemsSchema, value),
+		...value,
 	};
 }
 

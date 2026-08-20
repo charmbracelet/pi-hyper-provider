@@ -1,5 +1,6 @@
 import type { Model, ThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
 import { type Static, Type } from "typebox";
+import { Compile } from "typebox/compile";
 import { fetchJson } from "./http.js";
 import { HYPER_API_BASE_URL, HYPER_USER_AGENT, PROVIDER_NAME } from "./hyper.js";
 import { parseSchema } from "./schema.js";
@@ -52,6 +53,7 @@ const ProviderPayloadSchema = Type.Object(
 	},
 	{ additionalProperties: true },
 );
+const ProviderPayloadValidator = Compile(ProviderPayloadSchema);
 
 type ProviderModel = Static<typeof ProviderModelSchema>;
 
@@ -110,6 +112,6 @@ export async function fetchHyperModels(signal?: AbortSignal): Promise<Model<"ope
 		signal,
 		timeoutMs: MODEL_FETCH_TIMEOUT_MS,
 	});
-	const provider = parseSchema(ProviderPayloadSchema, payload, "Hyper /provider response");
+	const provider = parseSchema(ProviderPayloadValidator, payload, "Hyper /provider response");
 	return provider.models.map(toProviderModel);
 }

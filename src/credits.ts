@@ -1,6 +1,7 @@
 import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { Compile } from "typebox/compile";
 import * as httpClient from "./http.js";
 import { HYPER_API_BASE_URL, hyperJsonHeaders, PROVIDER_NAME } from "./hyper.js";
 import type { WarningSink } from "./notify.js";
@@ -25,6 +26,7 @@ const CreditsPayloadSchema = Type.Object(
 	},
 	{ additionalProperties: false },
 );
+const CreditsPayloadValidator = Compile(CreditsPayloadSchema);
 
 async function fetchCredits(apiKey: string, signal: AbortSignal): Promise<number> {
 	const payload = await httpClient.fetchJson(`${HYPER_API_BASE_URL}/credits`, {
@@ -32,7 +34,7 @@ async function fetchCredits(apiKey: string, signal: AbortSignal): Promise<number
 		signal,
 		timeoutMs: CREDITS_FETCH_TIMEOUT_MS,
 	});
-	return parseSchema(CreditsPayloadSchema, payload, "Hyper /credits response").balance;
+	return parseSchema(CreditsPayloadValidator, payload, "Hyper /credits response").balance;
 }
 
 function isTransientCreditError(error: unknown): boolean {

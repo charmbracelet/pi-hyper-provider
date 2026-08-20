@@ -1,16 +1,15 @@
-import type { Static, TSchema } from "typebox";
-import { Value } from "typebox/value";
+import type { Static, TProperties, TSchema } from "typebox";
+import type { Validator } from "typebox/compile";
+import { Errors } from "typebox/value";
 
-export function parseSchema<const Schema extends TSchema>(
-	schema: Schema,
+export function parseSchema<Context extends TProperties, const Schema extends TSchema>(
+	validator: Validator<Context, Schema>,
 	payload: unknown,
 	source: string,
-): Static<Schema> {
-	if (Value.Check(schema, payload)) {
-		return Value.Parse(schema, payload);
-	}
+): Static<Schema, Context> {
+	if (validator.Check(payload)) return payload;
 
-	const details = [...Value.Errors(schema, payload)]
+	const details = Errors(validator.Context(), validator.Type(), payload)
 		.slice(0, 3)
 		.map((error) => `${formatErrorPath(source, error.instancePath)} ${error.message}`)
 		.join("; ");

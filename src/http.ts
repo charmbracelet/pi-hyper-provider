@@ -1,6 +1,6 @@
 import { STATUS_CODES } from "node:http";
-import { type TSchema, Type } from "typebox";
-import { Value } from "typebox/value";
+import { type TProperties, type TSchema, Type } from "typebox";
+import { Compile, type Validator } from "typebox/compile";
 
 const OpenAIErrorPayloadSchema = Type.Object(
 	{
@@ -15,6 +15,7 @@ const OpenAIErrorPayloadSchema = Type.Object(
 	},
 	{ additionalProperties: false },
 );
+const OpenAIErrorPayloadValidator = Compile(OpenAIErrorPayloadSchema);
 
 const MAX_ERROR_MESSAGE_CHARACTERS = 200;
 const SAFE_ERROR_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
@@ -51,8 +52,10 @@ export class HttpResponseError extends Error {
 		this.#responseJson = responseJson;
 	}
 
-	matchesResponseJson(schema: TSchema): boolean {
-		return this.#responseJson.kind === "parsed" && Value.Check(schema, this.#responseJson.value);
+	matchesResponseJson<Context extends TProperties, const Schema extends TSchema>(
+		validator: Validator<Context, Schema>,
+	): boolean {
+		return this.#responseJson.kind === "parsed" && validator.Check(this.#responseJson.value);
 	}
 }
 
@@ -218,7 +221,7 @@ function formatHttpStatus(status: number): string {
 }
 
 function parseSafeOpenAIError(payload: unknown): string | undefined {
-	if (!Value.Check(OpenAIErrorPayloadSchema, payload)) return undefined;
+	if (!OpenAIErrorPayloadValidator.Check(payload)) return undefined;
 
 	const parsed = payload.error;
 	if (!SAFE_ERROR_TOKEN.test(parsed.type)) return undefined;
