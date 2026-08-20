@@ -93,6 +93,7 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 	let retryAtMs = 0;
 	let currentApiKey: string | undefined;
 	let cachedBalance: number | undefined;
+	let statusItemsCache: HyperStatusItems | undefined;
 	let inFlight:
 		| { apiKey: string; credentialEpoch: number; controller: AbortController; operation: Promise<void> }
 		| undefined;
@@ -110,8 +111,13 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 		inFlight?.controller.abort();
 	}
 
+	function getStatusItems(): HyperStatusItems {
+		if (statusItemsCache === undefined) statusItemsCache = readHyperStatusItems(warn);
+		return statusItemsCache;
+	}
+
 	function renderStatus(ctx: ExtensionContext): void {
-		const statusItems = readHyperStatusItems(warn);
+		const statusItems = getStatusItems();
 		const teamName = storedTeamName();
 		if (!statusItems.hypercredits || cachedBalance === undefined) {
 			ctx.ui.setStatus(PROVIDER_NAME, teamNameStatusText(statusItems, teamName));
@@ -197,7 +203,7 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 			return;
 		}
 
-		const statusItems = readHyperStatusItems(warn);
+		const statusItems = getStatusItems();
 		if (!statusItems.hypercredits) {
 			committedInvocation = invocation;
 			invalidateCredential();
@@ -261,18 +267,27 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 			if (disposed) return;
 			if (!args.trim()) {
 				if (!ctx.hasUI) {
-					ctx.ui.notify(statusItemsSummary(readHyperStatusItems(warn)), "info");
+					ctx.ui.notify(statusItemsSummary(getStatusItems()), "info");
 					return;
 				}
 
-				const changed = await configureStatusItems(ctx, warn, () => disposed);
+				const statusItems = await configureStatusItems(ctx, getStatusItems(), () => disposed);
 				if (disposed) return;
-				if (changed) await refreshStatus(ctx, ctx.model, true);
+				if (statusItems) {
+					writeHyperStatusItems(statusItems);
+					statusItemsCache = statusItems;
+					ctx.ui.notify(`Hyper status updated. ${statusItemsSummary(statusItems)}`, "info");
+					await refreshStatus(ctx, ctx.model, true);
+				}
 				return;
 			}
 
-			const result = updateStatusItems(args, warn);
+			const result = updateStatusItems(args, getStatusItems());
 			if (disposed) return;
+			if (result.kind === "changed") {
+				writeHyperStatusItems(result.statusItems);
+				statusItemsCache = result.statusItems;
+			}
 			ctx.ui.notify(result.message, "info");
 			if (result.kind === "changed") await refreshStatus(ctx, ctx.model, true);
 		},
@@ -292,10 +307,9 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 
 async function configureStatusItems(
 	ctx: ExtensionContext,
-	warn: (message: string) => void,
+	initial: HyperStatusItems,
 	isDisposed: () => boolean,
-): Promise<boolean> {
-	const initial = readHyperStatusItems(warn);
+): Promise<HyperStatusItems | undefined> {
 	let draft: HyperStatusItems = { ...initial };
 
 	for (;;) {
@@ -312,11 +326,11 @@ async function configureStatusItems(
 			saveOption,
 			cancelOption,
 		]);
-		if (isDisposed()) return false;
+		if (isDisposed()) return undefined;
 
 		if (choice === undefined || choice === cancelOption) {
 			ctx.ui.notify("Hyper status settings unchanged", "info");
-			return false;
+			return undefined;
 		}
 		if (choice === teamOption) {
 			draft = { ...draft, teamName: !draft.teamName };
@@ -333,42 +347,42 @@ async function configureStatusItems(
 		if (choice === saveOption) {
 			if (sameStatusItems(initial, draft)) {
 				ctx.ui.notify(`Hyper status unchanged. ${statusItemsSummary(draft)}`, "info");
-				return false;
+				return undefined;
 			}
 
 			const ok = await ctx.ui.confirm("Save Hyper status settings?", statusItemsSummary(draft));
-			if (isDisposed()) return false;
+			if (isDisposed()) return undefined;
 			if (!ok) {
 				ctx.ui.notify("Hyper status settings unchanged", "info");
-				return false;
+				return undefined;
 			}
 
-			if (isDisposed()) return false;
-			writeHyperStatusItems(draft);
-			ctx.ui.notify(`Hyper status updated. ${statusItemsSummary(draft)}`, "info");
-			return true;
+			if (isDisposed()) return undefined;
+			return draft;
 		}
 	}
 }
 
 type StatusItemsUpdate =
-	| { kind: "changed"; message: string }
+	| { kind: "changed"; message: string; statusItems: HyperStatusItems }
 	| { kind: "unchanged"; message: string }
 	| { kind: "invalid"; message: string };
 
-function updateStatusItems(args: string, warn?: (message: string) => void): StatusItemsUpdate {
+function updateStatusItems(args: string, previous: HyperStatusItems): StatusItemsUpdate {
 	const tokens = args.trim().split(/\s+/).filter(Boolean);
 	if (tokens.length === 0) {
-		return { kind: "unchanged", message: statusItemsSummary(readHyperStatusItems(warn)) };
+		return { kind: "unchanged", message: statusItemsSummary(previous) };
 	}
 	if (tokens.length === 1 && tokens[0] === "reset") {
 		const statusItems = defaultHyperStatusItems();
-		const previous = readHyperStatusItems(warn);
 		if (sameStatusItems(previous, statusItems)) {
 			return { kind: "unchanged", message: `Hyper status unchanged. ${statusItemsSummary(statusItems)}` };
 		}
-		writeHyperStatusItems(statusItems);
-		return { kind: "changed", message: `Hyper status reset. ${statusItemsSummary(statusItems)}` };
+		return {
+			kind: "changed",
+			message: `Hyper status reset. ${statusItemsSummary(statusItems)}`,
+			statusItems,
+		};
 	}
 	if (tokens.length !== 2) {
 		return { kind: "invalid", message: "Usage: /hyper-status [teamName true|false | hypercredits true|false | reset]" };
@@ -379,7 +393,6 @@ function updateStatusItems(args: string, warn?: (message: string) => void): Stat
 		return { kind: "invalid", message: "Usage: /hyper-status [teamName true|false | hypercredits true|false | reset]" };
 	}
 
-	const previous = readHyperStatusItems(warn);
 	const statusItems = {
 		...previous,
 		[key]: rawValue === "true",
@@ -387,8 +400,11 @@ function updateStatusItems(args: string, warn?: (message: string) => void): Stat
 	if (sameStatusItems(previous, statusItems)) {
 		return { kind: "unchanged", message: `Hyper status unchanged. ${statusItemsSummary(statusItems)}` };
 	}
-	writeHyperStatusItems(statusItems);
-	return { kind: "changed", message: `Hyper status updated. ${statusItemsSummary(statusItems)}` };
+	return {
+		kind: "changed",
+		message: `Hyper status updated. ${statusItemsSummary(statusItems)}`,
+		statusItems,
+	};
 }
 
 function onOff(value: boolean): "on" | "off" {
