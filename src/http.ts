@@ -18,6 +18,9 @@ const OpenAIErrorPayloadSchema = Type.Object(
 const OpenAIErrorPayloadValidator = Compile(OpenAIErrorPayloadSchema);
 
 const MAX_ERROR_MESSAGE_CHARACTERS = 200;
+const RETRY_AFTER_DELAY_MS_MAX = 24 * 60 * 60_000;
+const RETRY_AFTER_HTTP_DATE = /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/;
+const RETRY_AFTER_SECONDS = /^\d+$/;
 const SAFE_ERROR_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 const UNSAFE_ERROR_MESSAGE = /[<>\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 
@@ -46,6 +49,7 @@ export class HttpResponseError extends Error {
 		readonly status: number,
 		message: string,
 		responseJson: HttpResponseJson,
+		readonly retryAfterMs?: number,
 	) {
 		super(message);
 		this.name = "HttpResponseError";
@@ -133,6 +137,7 @@ export async function fetchJsonResponse(url: string, options: FetchJsonOptions):
 					response.status,
 					`${url} returned ${formatHttpStatus(response.status)}; response body could not be read`,
 					{ kind: "unavailable" },
+					parseRetryAfterMs(response.headers.get("Retry-After")),
 				);
 			}
 			throw new HttpNetworkError(
@@ -146,6 +151,7 @@ export async function fetchJsonResponse(url: string, options: FetchJsonOptions):
 				response.status,
 				formatHttpResponseError(url, response.status, responseJson),
 				responseJson,
+				parseRetryAfterMs(response.headers.get("Retry-After")),
 			);
 		}
 		return {
@@ -177,6 +183,23 @@ export async function fetchJsonResponse(url: string, options: FetchJsonOptions):
 
 function abortedBy(signal: AbortSignal, source: AbortSignal): boolean {
 	return signal.aborted && source.aborted && signal.reason === source.reason;
+}
+
+function parseRetryAfterMs(value: string | null): number | undefined {
+	if (value === null) return undefined;
+	const normalized = value.trim();
+	let delayMs: number;
+	if (RETRY_AFTER_SECONDS.test(normalized)) {
+		delayMs = Number(normalized) * 1000;
+	} else if (RETRY_AFTER_HTTP_DATE.test(normalized)) {
+		const retryAtMs = Date.parse(normalized);
+		if (Number.isNaN(retryAtMs) || new Date(retryAtMs).toUTCString() !== normalized) return undefined;
+		delayMs = retryAtMs - Date.now();
+	} else {
+		return undefined;
+	}
+	if (Number.isNaN(delayMs)) return undefined;
+	return Math.min(Math.max(0, delayMs), RETRY_AFTER_DELAY_MS_MAX);
 }
 
 function parseJsonBody(url: string, status: number, body: string): unknown {

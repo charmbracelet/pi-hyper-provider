@@ -90,7 +90,7 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 	let committedInvocation = 0;
 	let credentialEpoch = 0;
 	let consecutiveFailures = 0;
-	let retryAfterMs = 0;
+	let retryAtMs = 0;
 	let currentApiKey: string | undefined;
 	let cachedBalance: number | undefined;
 	let inFlight:
@@ -102,7 +102,7 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 	function clearCreditState(): void {
 		cachedBalance = undefined;
 		consecutiveFailures = 0;
-		retryAfterMs = 0;
+		retryAtMs = 0;
 	}
 
 	function invalidateCredential(): void {
@@ -139,7 +139,7 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 			if (disposed || !ownsCredential(lease)) return;
 			cachedBalance = balance;
 			consecutiveFailures = 0;
-			retryAfterMs = 0;
+			retryAtMs = 0;
 		} catch (error) {
 			if (disposed || !ownsCredential(lease)) throw error;
 			if (!isTransientCreditError(error)) {
@@ -147,11 +147,14 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 				throw error;
 			}
 			consecutiveFailures += 1;
-			const retryDelayMs = Math.min(
-				CREDITS_RETRY_DELAY_MS_INITIAL * 2 ** Math.min(consecutiveFailures - 1, CREDITS_RETRY_EXPONENT_MAX),
-				CREDITS_RETRY_DELAY_MS_MAX,
-			);
-			retryAfterMs = Date.now() + retryDelayMs;
+			const retryDelayMs =
+				error instanceof httpClient.HttpResponseError && error.retryAfterMs !== undefined
+					? error.retryAfterMs
+					: Math.min(
+							CREDITS_RETRY_DELAY_MS_INITIAL * 2 ** Math.min(consecutiveFailures - 1, CREDITS_RETRY_EXPONENT_MAX),
+							CREDITS_RETRY_DELAY_MS_MAX,
+						);
+			retryAtMs = Date.now() + retryDelayMs;
 			throw error;
 		}
 	}
@@ -220,7 +223,7 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 				return;
 			}
 			if (invocation >= committedInvocation) committedInvocation = invocation;
-			if (!isUserRequested && currentApiKey === auth.apiKey && Date.now() < retryAfterMs) {
+			if (!isUserRequested && currentApiKey === auth.apiKey && Date.now() < retryAtMs) {
 				// This auth result supersedes older general state, but a same-credential
 				// forced refresh retains its independent fetch lease.
 				return;
