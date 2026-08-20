@@ -2,7 +2,7 @@ import type { Model, ThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-
 import { type Static, Type } from "typebox";
 import { Compile } from "typebox/compile";
 import { fetchJson } from "./http.js";
-import { HYPER_API_BASE_URL, HYPER_USER_AGENT, PROVIDER_NAME } from "./hyper.js";
+import { HYPER_API_BASE_URL, HYPER_USER_AGENT, hyperJsonHeaders, PROVIDER_NAME } from "./hyper.js";
 import { parseSchema } from "./schema.js";
 
 const MODEL_FETCH_TIMEOUT_MS = 3_000;
@@ -107,8 +107,15 @@ function buildThinkingLevelMap(levels: string[]): ThinkingLevelMap | undefined {
 	return result;
 }
 
-export async function fetchHyperModels(signal?: AbortSignal): Promise<Model<"openai-completions">[]> {
+export async function fetchHyperModels({
+	signal,
+	token,
+}: {
+	signal: AbortSignal;
+	token: string | undefined;
+}): Promise<Model<"openai-completions">[]> {
 	const payload = await fetchJson(`${HYPER_API_BASE_URL}/provider`, {
+		headers: token ? hyperJsonHeaders({ Authorization: `Bearer ${token}` }) : undefined,
 		signal,
 		timeoutMs: MODEL_FETCH_TIMEOUT_MS,
 	});

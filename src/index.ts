@@ -1,4 +1,4 @@
-import { createProvider, envApiKeyAuth, lazyOAuth, type OAuthAuth } from "@earendil-works/pi-ai";
+import { envApiKeyAuth, lazyOAuth, type Model, type OAuthAuth } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { CreditStatusRuntime } from "./credits.js";
@@ -18,6 +18,8 @@ type PendingCreditStatusRefresh = {
 
 export default function (pi: ExtensionAPI) {
 	const notifier = createNotifier();
+	const hyperApi = openAICompletionsApi();
+	let hyperModels: readonly Model<"openai-completions">[] = [];
 	let creditStatusState: CreditStatusState = { kind: "idle" };
 	let pendingCreditStatusRefresh: PendingCreditStatusRefresh | undefined;
 	let creditStatusRefreshWork: ReturnType<typeof setImmediate> | undefined;
@@ -109,34 +111,49 @@ export default function (pi: ExtensionAPI) {
 		scheduleCreditStatusRefresh(ctx, ctx.model);
 	});
 
-	pi.registerProvider(
-		createProvider({
-			id: PROVIDER_NAME,
-			name: PROVIDER_DISPLAY_NAME,
-			baseUrl: HYPER_API_BASE_URL,
-			auth: {
-				apiKey: envApiKeyAuth("Hyper API key", ["HYPER_API_KEY"]),
-				oauth: lazyOAuth({
-					name: PROVIDER_DISPLAY_NAME,
-					load: async () => {
-						const { loginHyper, refreshHyperToken } = await import("./oauth.js");
-						return {
-							name: PROVIDER_DISPLAY_NAME,
-							login: loginHyper,
-							refresh: refreshHyperToken,
-							toAuth: async (credential) => ({ apiKey: credential.access }),
-						} satisfies OAuthAuth;
-					},
-				}),
-			},
-			models: [],
-			fetchModels: async ({ signal }) => {
-				const { fetchHyperModels } = await import("./models.js");
-				return fetchHyperModels(signal);
-			},
-			api: openAICompletionsApi(),
-		}),
-	);
+	pi.registerProvider({
+		id: PROVIDER_NAME,
+		name: PROVIDER_DISPLAY_NAME,
+		baseUrl: HYPER_API_BASE_URL,
+		auth: {
+			apiKey: envApiKeyAuth("Hyper API key", ["HYPER_API_KEY"]),
+			oauth: lazyOAuth({
+				name: PROVIDER_DISPLAY_NAME,
+				load: async () => {
+					const { loginHyper, refreshHyperToken } = await import("./oauth.js");
+					return {
+						name: PROVIDER_DISPLAY_NAME,
+						login: loginHyper,
+						refresh: refreshHyperToken,
+						toAuth: async (credential) => ({ apiKey: credential.access }),
+					} satisfies OAuthAuth;
+				},
+			}),
+		},
+		getModels: () => hyperModels,
+		refreshModels: async ({ allowNetwork, credential, publish, signal, stored }) => {
+			const cleared = await publish({
+				update: () => {
+					hyperModels = [];
+				},
+			});
+			if (!cleared) return;
+			if (stored && !(await publish({ persist: null }))) return;
+			if (!allowNetwork || signal.aborted) return;
+
+			const token = credential?.type === "oauth" ? credential.access : credential?.key;
+			const { fetchHyperModels } = await import("./models.js");
+			const refreshed = await fetchHyperModels({ signal, token });
+			if (signal.aborted) return;
+			await publish({
+				update: () => {
+					hyperModels = refreshed;
+				},
+			});
+		},
+		stream: hyperApi.stream,
+		streamSimple: hyperApi.streamSimple,
+	});
 
 	pi.registerCommand("hyper-status", {
 		description: "Configure the Charm Hyper footer status",
