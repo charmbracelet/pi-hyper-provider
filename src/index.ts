@@ -161,8 +161,8 @@ export default function (pi: ExtensionAPI) {
 		scheduleCreditStatusRefresh(ctx, event.model);
 	});
 
-	pi.on("message_end", (event, ctx) => {
-		if (!ctx.hasUI || event.message.role !== "assistant" || ctx.model?.provider !== PROVIDER_NAME) return;
+	pi.on("agent_settled", (_event, ctx) => {
+		if (creditStatusState.kind === "disposed" || !ctx.hasUI || ctx.model?.provider !== PROVIDER_NAME) return;
 		scheduleCreditStatusRefresh(ctx, ctx.model);
 	});
 
