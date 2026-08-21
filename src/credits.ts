@@ -20,21 +20,30 @@ const CREDITS_RETRY_DELAY_MS_INITIAL = 5_000;
 const CREDITS_RETRY_DELAY_MS_MAX = 5 * 60_000;
 const CREDITS_RETRY_EXPONENT_MAX = 6;
 
-const CreditsPayloadSchema = Type.Object(
-	{
-		balance: Type.Number(),
-	},
-	{ additionalProperties: false },
-);
+const CreditsPayloadSchema = Type.Union([
+	Type.Object(
+		{
+			balance: Type.Number(),
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
+			balance_usd: Type.Number(),
+		},
+		{ additionalProperties: false },
+	),
+]);
 const CreditsPayloadValidator = Compile(CreditsPayloadSchema);
 
-async function fetchCredits(apiKey: string, signal: AbortSignal): Promise<number> {
+async function fetchCredits(apiKey: string, signal: AbortSignal): Promise<number | undefined> {
 	const payload = await httpClient.fetchJson(`${HYPER_API_BASE_URL}/credits`, {
 		headers: hyperJsonHeaders({ Authorization: `Bearer ${apiKey}` }),
 		signal,
 		timeoutMs: CREDITS_FETCH_TIMEOUT_MS,
 	});
-	return parseSchema(CreditsPayloadValidator, payload, "Hyper /credits response").balance;
+	const credits = parseSchema(CreditsPayloadValidator, payload, "Hyper /credits response");
+	return "balance" in credits ? credits.balance : undefined;
 }
 
 function isTransientCreditError(error: unknown): boolean {
