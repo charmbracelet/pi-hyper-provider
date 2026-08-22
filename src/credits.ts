@@ -65,7 +65,7 @@ function isHyperModel(model: ExtensionContext["model"]): model is NonNullable<Ex
 }
 
 function statusText(balance: number, statusItems: HyperStatusItems, teamName: string | undefined): string {
-	const credits = `${HYPER_GEM} ${formatCredits(balance)} hc`;
+	const credits = `${HYPER_GEM} ${formatCredits(balance)} HC`;
 	if (statusItems.teamName && teamName) return `${teamName}: ${credits}`;
 	return credits;
 }
