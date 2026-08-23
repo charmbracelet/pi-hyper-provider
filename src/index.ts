@@ -1,4 +1,5 @@
 import { createProvider, envApiKeyAuth, lazyOAuth, type OAuthAuth } from "@earendil-works/pi-ai";
+// Pi 0.84.2's extension loader aliases the root package but not API subpaths.
 import { openAICompletionsApi } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { CreditStatusRuntime } from "./credits.js";

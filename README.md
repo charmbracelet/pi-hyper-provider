@@ -18,10 +18,9 @@ pi install git:github.com/charmbracelet/pi-hyper-provider
 ```
 
 > [!IMPORTANT]
-> As of v83, Pi only creates and updates provider extensions' model caches when
-> launched interactively. If you mostly use Pi in headless or non-interactive
-> environments, open the TUI whenever you want to get new models or updated
-> metadata.
+> Pi refreshes provider extensions' model catalogs in TUI and RPC modes. Other
+> non-interactive modes use the latest persisted catalog, so open the TUI when
+> you want to discover new models or update model metadata.
 
 ## Usage
 
