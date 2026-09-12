@@ -2,6 +2,7 @@ import { createProvider, envApiKeyAuth, lazyOAuth, type OAuthAuth } from "@earen
 // Pi 0.84.2's extension loader aliases the root package but not API subpaths.
 import { openAICompletionsApi } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import type { CreditStatusRuntime } from "./credits.js";
 import { HYPER_API_BASE_URL, PROVIDER_DISPLAY_NAME, PROVIDER_NAME } from "./hyper.js";
 import { createNotifier } from "./notify.js";
@@ -17,13 +18,31 @@ type PendingCreditStatusRefresh = {
 	model: ExtensionContext["model"];
 };
 
+function prismLabel(value: string | undefined): string | undefined {
+	return value !== undefined && value.trim() !== "" && value.length <= 200 && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value)
+		? value.trim()
+		: undefined;
+}
+
 export default function (pi: ExtensionAPI) {
 	const notifier = createNotifier();
 	let creditStatusState: CreditStatusState = { kind: "idle" };
 	let pendingCreditStatusRefresh: PendingCreditStatusRefresh | undefined;
 	let creditStatusRefreshWork: ReturnType<typeof setImmediate> | undefined;
 	let collectingPrismRoute = false;
-	let prismRoute: string | undefined;
+	let prismRoute: { modelName: string | undefined; modelId: string | undefined } | undefined;
+
+	pi.registerEntryRenderer("hyper-prism-route", (entry, _options, theme) => {
+		const data = entry.data;
+		if (typeof data !== "object" || data === null) return;
+		const modelName =
+			"modelName" in data && typeof data.modelName === "string" ? prismLabel(data.modelName) : undefined;
+		const modelId = "modelId" in data && typeof data.modelId === "string" ? prismLabel(data.modelId) : undefined;
+		const label = modelName ?? modelId;
+		if (label) {
+			return new Text(`${theme.fg("muted", "Prism")} ${theme.fg("dim", "→")} ${theme.fg("muted", label)}`, 0, 0);
+		}
+	});
 
 	function loadCreditStatus(): Promise<CreditStatusRuntime> {
 		if (creditStatusState.kind === "ready") return Promise.resolve(creditStatusState.runtime);
@@ -120,22 +139,19 @@ export default function (pi: ExtensionAPI) {
 	pi.on("after_provider_response", (event) => {
 		if (!collectingPrismRoute) return;
 		// Collect only during the assistant request, not between-turn compaction.
-		const label = [event.headers["x-prism-model-name"], event.headers["x-prism-model-id"]].find(
-			(value) =>
-				value !== undefined && value.trim() !== "" && value.length <= 200 && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value),
-		);
-		prismRoute = label?.trim();
+		const modelName = prismLabel(event.headers["x-prism-model-name"]);
+		const modelId = prismLabel(event.headers["x-prism-model-id"]);
+		prismRoute = modelName || modelId ? { modelName, modelId } : undefined;
 	});
 
 	pi.on("message_end", (event) => {
 		if (event.message.role === "assistant") collectingPrismRoute = false;
 	});
 
-	pi.on("turn_end", (event, ctx) => {
-		const label = prismRoute;
+	pi.on("turn_end", (event) => {
+		const route = prismRoute;
 		prismRoute = undefined;
 		collectingPrismRoute = false;
-		if (!ctx.hasUI) return;
 		if (
 			event.message.role !== "assistant" ||
 			event.message.provider !== PROVIDER_NAME ||
@@ -145,7 +161,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		// message_end extensions run before the final UI update. turn_end runs
 		// after the assistant and its tool results have been rendered.
-		if (label) ctx.ui.notify(`Prism → ${label}`, "info");
+		if (route) pi.appendEntry("hyper-prism-route", route);
 	});
 
 	pi.registerProvider(

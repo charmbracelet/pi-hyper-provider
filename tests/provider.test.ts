@@ -32,7 +32,7 @@ test("Pi loads Hyper, persists refreshed models, restores offline, and retains t
 	await credentials.modify("hyper", async () => ({ type: "api_key", key: "fixture-api-key" }));
 	const extensionPath = fileURLToPath(new URL("../src/index.ts", import.meta.url));
 
-	async function load() {
+	async function load(sessionManager = SessionManager.create(agentDir, path.join(agentDir, "sessions"))) {
 		const runtime = await ModelRuntime.create({
 			credentials,
 			modelsPath: path.join(agentDir, "models.json"),
@@ -54,11 +54,11 @@ test("Pi loads Hyper, persists refreshed models, restores offline, and retains t
 			cwd: agentDir,
 			modelRuntime: runtime,
 			resourceLoader: loader,
-			sessionManager: SessionManager.inMemory(agentDir),
+			sessionManager,
 			noTools: "all",
 		});
 		assert.ok(runtime.getRegisteredNativeProvider("hyper"));
-		return { runtime, session };
+		return { runtime, session, sessionManager };
 	}
 
 	let requests = 0;
@@ -115,17 +115,22 @@ test("Pi loads Hyper, persists refreshed models, restores offline, and retains t
 			stopReason: "stop",
 			timestamp: 1,
 		};
-		const notices: Array<{ message: string; type: string | undefined }> = [];
+		first.sessionManager.appendMessage(message);
+		const routes = () =>
+			first.sessionManager
+				.getEntries()
+				.filter((entry) => entry.type === "custom")
+				.filter((entry) => entry.customType === "hyper-prism-route");
 		const ui = {
 			...runner.createContext().ui,
-			notify: (message: string, type?: "info" | "warning" | "error") => {
-				notices.push({ message, type });
+			notify: () => {
+				assert.fail("routing must use durable entries, not notifications");
 			},
 		};
 		for (const mode of ["tui", "rpc", "print", "json"] as const) {
 			runner.setUIContext(mode === "tui" || mode === "rpc" ? ui : undefined, mode);
 			assert.equal(runner.createContext().hasUI, mode === "tui" || mode === "rpc");
-			notices.length = 0;
+			const start = routes().length;
 			const responses: Record<string, string>[] = [
 				{ "x-prism-model-name": " GLM 5.3 Flash ", "x-prism-model-id": "glm-5.3-flash" },
 				{ "x-prism-model-name": "GLM 5.3 Flash" },
@@ -139,24 +144,24 @@ test("Pi loads Hyper, persists refreshed models, restores offline, and retains t
 			];
 			for (const headers of responses) {
 				await runner.emit({ type: "turn_start", turnIndex: 0, timestamp: 1 });
-				const count = notices.length;
+				const count = routes().length;
 				await runner.emit({ type: "after_provider_response", status: 200, headers });
 				await runner.emitMessageEnd({ type: "message_end", message });
-				assert.equal(notices.length, count, "wait until the response has been rendered");
+				assert.equal(routes().length, count, "wait until the response has been rendered");
 				await runner.emit({ type: "turn_end", turnIndex: 0, message, toolResults: [] });
 			}
 			assert.deepEqual(
-				notices,
-				mode === "tui" || mode === "rpc"
-					? [
-							{ message: "Prism → GLM 5.3 Flash", type: "info" },
-							{ message: "Prism → GLM 5.3 Flash", type: "info" },
-							{ message: "Prism → glm-5.3-flash", type: "info" },
-						]
-					: [],
-				`${mode} routing notifications`,
+				routes()
+					.slice(start)
+					.map((entry) => entry.data),
+				[
+					{ modelName: "GLM 5.3 Flash", modelId: "glm-5.3-flash" },
+					{ modelName: "GLM 5.3 Flash", modelId: undefined },
+					{ modelName: undefined, modelId: "glm-5.3-flash" },
+				],
+				`${mode} routing entries`,
 			);
-			const count = notices.length;
+			const count = routes().length;
 			const headers = { "x-prism-model-name": "Do not display" };
 			// Auxiliary responses outside a turn must not leak into the next one.
 			await runner.emit({ type: "after_provider_response", status: 200, headers });
@@ -171,15 +176,69 @@ test("Pi loads Hyper, persists refreshed models, restores offline, and retains t
 				await runner.emit({ type: "turn_end", turnIndex: 2, message: { ...message, stopReason }, toolResults: [] });
 			}
 			await runner.emit({ type: "turn_start", turnIndex: 3, timestamp: 4 });
+			await runner.emit({ type: "after_provider_response", status: 200, headers });
+			await runner.emit({
+				type: "turn_end",
+				turnIndex: 3,
+				message: { ...message, provider: "other" },
+				toolResults: [],
+			});
+			await runner.emit({ type: "turn_start", turnIndex: 3, timestamp: 4 });
 			await runner.emit({ type: "turn_end", turnIndex: 3, message, toolResults: [] });
-			assert.equal(notices.length, count, "discard auxiliary, cancelled, failed, and stale routes");
+			assert.equal(routes().length, count, "discard auxiliary, cancelled, failed, and stale routes");
 		}
 	} finally {
 		first.session.dispose();
 	}
 
-	const restored = await load();
+	const sessionFile = first.sessionManager.getSessionFile();
+	assert.ok(sessionFile);
+	const restored = await load(SessionManager.open(sessionFile));
 	try {
+		const entries = restored.sessionManager
+			.getEntries()
+			.filter((entry) => entry.type === "custom")
+			.filter((entry) => entry.customType === "hyper-prism-route");
+		assert.equal(entries.length, 12, "routes survive reopening the JSONL session");
+		assert.deepEqual(entries[0]?.data, { modelName: "GLM 5.3 Flash", modelId: "glm-5.3-flash" });
+		assert.deepEqual(
+			restored.sessionManager.buildSessionContext().messages.map((message) => message.role),
+			["assistant"],
+			"routing entries never enter model context",
+		);
+		const renderer = restored.session.extensionRunner.getEntryRenderer("hyper-prism-route");
+		assert.ok(renderer);
+		const { getThemeByName } = await import(
+			"../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js"
+		);
+		for (const themeName of ["dark", "light"]) {
+			const theme = getThemeByName(themeName);
+			assert.ok(theme);
+			const savedEntry = entries[0];
+			assert.ok(savedEntry);
+			for (const data of [null, { modelName: 42 }, { modelName: "bad\u001b[31m" }, { modelId: "bad\nline" }]) {
+				assert.equal(
+					renderer({ ...savedEntry, data }, { expanded: false }, theme),
+					undefined,
+					"reject unsafe saved labels",
+				);
+			}
+			for (const [index, label] of [
+				[0, "GLM 5.3 Flash"],
+				[2, "glm-5.3-flash"],
+			] as const) {
+				const entry = entries[index];
+				assert.ok(entry);
+				const component = renderer(entry, { expanded: false }, theme);
+				assert.ok(component);
+				assert.ok(
+					component
+						.render(80)
+						.join("\n")
+						.includes(`${theme.fg("muted", "Prism")} ${theme.fg("dim", "→")} ${theme.fg("muted", label)}`),
+				);
+			}
+		}
 		await restored.runtime.refresh({ providers: ["hyper"], allowNetwork: false });
 		assert.equal(requests, 1, "offline restoration must not fetch");
 		assert.equal(restored.runtime.getModel("hyper", "fixture-model")?.name, "Fixture model");
