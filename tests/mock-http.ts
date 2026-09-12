@@ -37,7 +37,11 @@ globalThis.fetch = async (input) => {
 			choices: [{ index: 0, delta: { role: "assistant", content: "fixture response" }, finish_reason: "stop" }],
 		};
 		return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
-			headers: { "Content-Type": "text/event-stream" },
+			headers: {
+				"Content-Type": "text/event-stream",
+				"X-Prism-Model-Name": "GLM 5.3 Flash",
+				"X-Prism-Model-Id": "glm-5.3-flash",
+			},
 		});
 	}
 	// Built-in catalogs are irrelevant; reject them without contacting a server.

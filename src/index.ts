@@ -22,6 +22,8 @@ export default function (pi: ExtensionAPI) {
 	let creditStatusState: CreditStatusState = { kind: "idle" };
 	let pendingCreditStatusRefresh: PendingCreditStatusRefresh | undefined;
 	let creditStatusRefreshWork: ReturnType<typeof setImmediate> | undefined;
+	let collectingPrismRoute = false;
+	let prismRoute: string | undefined;
 
 	function loadCreditStatus(): Promise<CreditStatusRuntime> {
 		if (creditStatusState.kind === "ready") return Promise.resolve(creditStatusState.runtime);
@@ -108,6 +110,42 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		scheduleCreditStatusRefresh(ctx, ctx.model);
+	});
+
+	pi.on("turn_start", () => {
+		collectingPrismRoute = true;
+		prismRoute = undefined;
+	});
+
+	pi.on("after_provider_response", (event) => {
+		if (!collectingPrismRoute) return;
+		// Collect only during the assistant request, not between-turn compaction.
+		const label = [event.headers["x-prism-model-name"], event.headers["x-prism-model-id"]].find(
+			(value) =>
+				value !== undefined && value.trim() !== "" && value.length <= 200 && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value),
+		);
+		prismRoute = label?.trim();
+	});
+
+	pi.on("message_end", (event) => {
+		if (event.message.role === "assistant") collectingPrismRoute = false;
+	});
+
+	pi.on("turn_end", (event, ctx) => {
+		const label = prismRoute;
+		prismRoute = undefined;
+		collectingPrismRoute = false;
+		if (!ctx.hasUI) return;
+		if (
+			event.message.role !== "assistant" ||
+			event.message.provider !== PROVIDER_NAME ||
+			event.message.stopReason === "error" ||
+			event.message.stopReason === "aborted"
+		)
+			return;
+		// message_end extensions run before the final UI update. turn_end runs
+		// after the assistant and its tool results have been rendered.
+		if (label) ctx.ui.notify(`Prism → ${label}`, "info");
 	});
 
 	pi.registerProvider(
