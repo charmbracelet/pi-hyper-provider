@@ -5,11 +5,12 @@ import { appendFileSync } from "node:fs";
 await import("../node_modules/@earendil-works/pi-coding-agent/dist/core/http-dispatcher.js");
 
 // Preloaded only in isolated CLI smoke-test subprocesses. Never call real fetch.
-globalThis.fetch = async (input) => {
-	const url = input instanceof Request ? input.url : String(input);
+globalThis.fetch = async (input, init) => {
+	const request = input instanceof Request ? input : new Request(input, init);
+	const url = request.url;
 	const logPath = process.env.HYPER_TEST_REQUEST_LOG;
 	assert.ok(logPath);
-	appendFileSync(logPath, `${url}\n`);
+	appendFileSync(logPath, `${url}\t${request.headers.get("Authorization") ?? ""}\n`);
 	if (url === "https://hyper.charm.land/v1/credits") return Response.json({ balance: 42 });
 	if (url === "https://hyper.charm.land/v1/provider") {
 		return Response.json({

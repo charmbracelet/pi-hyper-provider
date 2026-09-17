@@ -75,9 +75,10 @@ function teamNameStatusText(statusItems: HyperStatusItems, teamName: string | un
 	return `${HYPER_GEM} ${teamName}`;
 }
 
-function storedTeamName(): string | undefined {
+function storedTeamName(apiKey?: string): string | undefined {
 	const credential = readStoredCredential(PROVIDER_NAME);
 	if (credential?.type !== "oauth") return undefined;
+	if (apiKey !== undefined && credential.access !== apiKey) return undefined;
 	const teamName = credential.teamName;
 	return typeof teamName === "string" && teamName.trim() ? teamName : undefined;
 }
@@ -101,16 +102,15 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 	let consecutiveFailures = 0;
 	let retryAtMs = 0;
 	let currentApiKey: string | undefined;
-	let cachedBalance: number | undefined;
+	let cachedCredit: { balance: number | undefined; teamName: string | undefined } | undefined;
 	let statusItemsCache: HyperStatusItems | undefined;
 	let inFlight:
 		| { apiKey: string; credentialEpoch: number; controller: AbortController; operation: Promise<void> }
 		| undefined;
 	let disposed = false;
-	type CredentialLease = { apiKey: string; credentialEpoch: number };
+	type CredentialLease = { apiKey: string; credentialEpoch: number; teamName: string | undefined };
 
-	function clearCreditState(): void {
-		cachedBalance = undefined;
+	function resetRetryState(): void {
 		consecutiveFailures = 0;
 		retryAtMs = 0;
 	}
@@ -127,12 +127,11 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 
 	function renderStatus(ctx: ExtensionContext): void {
 		const statusItems = getStatusItems();
-		const teamName = storedTeamName();
-		if (!statusItems.hypercredits || cachedBalance === undefined) {
-			ctx.ui.setStatus(PROVIDER_NAME, teamNameStatusText(statusItems, teamName));
+		if (!statusItems.hypercredits || cachedCredit?.balance === undefined) {
+			ctx.ui.setStatus(PROVIDER_NAME, teamNameStatusText(statusItems, storedTeamName()));
 			return;
 		}
-		ctx.ui.setStatus(PROVIDER_NAME, statusText(cachedBalance, statusItems, teamName));
+		ctx.ui.setStatus(PROVIDER_NAME, statusText(cachedCredit.balance, statusItems, cachedCredit.teamName));
 	}
 
 	function ownsCredential(lease: CredentialLease): boolean {
@@ -152,13 +151,12 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 		try {
 			const balance = await fetchCredits(lease.apiKey, signal);
 			if (disposed || !ownsCredential(lease)) return;
-			cachedBalance = balance;
-			consecutiveFailures = 0;
-			retryAtMs = 0;
+			cachedCredit = { balance, teamName: lease.teamName };
+			resetRetryState();
 		} catch (error) {
 			if (disposed || !ownsCredential(lease)) throw error;
 			if (!isTransientCreditError(error)) {
-				clearCreditState();
+				resetRetryState();
 				throw error;
 			}
 			consecutiveFailures += 1;
@@ -174,16 +172,16 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 		}
 	}
 
-	async function shareFetch(apiKey: string, expectedCredentialEpoch: number): Promise<void> {
+	async function shareFetch(lease: CredentialLease): Promise<void> {
 		const active = inFlight;
-		if (active?.apiKey === apiKey && active.credentialEpoch === expectedCredentialEpoch) {
+		if (active?.apiKey === lease.apiKey && active.credentialEpoch === lease.credentialEpoch) {
 			await active.operation;
 			return;
 		}
 
 		const controller = new AbortController();
-		const operation = fetchAndCache({ apiKey, credentialEpoch: expectedCredentialEpoch }, controller.signal);
-		const started = { apiKey, credentialEpoch: expectedCredentialEpoch, controller, operation };
+		const operation = fetchAndCache(lease, controller.signal);
+		const started = { apiKey: lease.apiKey, credentialEpoch: lease.credentialEpoch, controller, operation };
 		inFlight = started;
 		try {
 			await operation;
@@ -203,7 +201,9 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 		const invocation = invocationSequence + 1;
 		invocationSequence = invocation;
 		const forcedLease: CredentialLease | undefined =
-			isUserRequested && currentApiKey !== undefined ? { apiKey: currentApiKey, credentialEpoch } : undefined;
+			isUserRequested && currentApiKey !== undefined
+				? { apiKey: currentApiKey, credentialEpoch, teamName: cachedCredit?.teamName }
+				: undefined;
 		let failureLease: CredentialLease | undefined;
 		if (!isHyperModel(selectedModel)) {
 			committedInvocation = invocation;
@@ -224,36 +224,35 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 		// retaining a balance only while it belongs to the committed credential.
 		renderStatus(ctx);
 		try {
-			const auth = await ctx.modelRegistry.getApiKeyAndHeaders(selectedModel);
+			const auth = await ctx.modelRegistry.getProviderAuth(PROVIDER_NAME).catch(() => undefined);
 			if (disposed) return;
+			const apiKey = auth?.auth.apiKey;
 			const forcedLeaseStillValid =
-				forcedLease !== undefined && auth.ok && auth.apiKey === forcedLease.apiKey && ownsCredential(forcedLease);
+				forcedLease !== undefined && apiKey === forcedLease.apiKey && ownsCredential(forcedLease);
 			if (invocation < committedInvocation && !forcedLeaseStillValid) return;
-			if (!auth.ok || !auth.apiKey) {
+			if (!apiKey) {
 				committedInvocation = invocation;
 				invalidateCredential();
-				currentApiKey = undefined;
-				clearCreditState();
+				resetRetryState();
 				renderStatus(ctx);
 				return;
 			}
 			if (invocation >= committedInvocation) committedInvocation = invocation;
-			if (!isUserRequested && currentApiKey === auth.apiKey && Date.now() < retryAtMs) {
+			if (!isUserRequested && currentApiKey === apiKey && Date.now() < retryAtMs) {
 				// This auth result supersedes older general state, but a same-credential
 				// forced refresh retains its independent fetch lease.
 				return;
 			}
-			if (currentApiKey !== auth.apiKey) {
-				currentApiKey = auth.apiKey;
+			if (currentApiKey !== apiKey) {
+				currentApiKey = apiKey;
 				invalidateCredential();
-				clearCreditState();
-				// Never show the previous account while the replacement request runs.
+				resetRetryState();
 				renderStatus(ctx);
 			}
 			const expectedCredentialEpoch = credentialEpoch;
-			const lease = { apiKey: auth.apiKey, credentialEpoch: expectedCredentialEpoch };
+			const lease = { apiKey, credentialEpoch: expectedCredentialEpoch, teamName: storedTeamName(apiKey) };
 			failureLease = lease;
-			await shareFetch(auth.apiKey, expectedCredentialEpoch);
+			await shareFetch(lease);
 			if (disposed) return;
 			if (!canRender(invocation, forcedLease)) return;
 			render(ctx, lease);
@@ -262,12 +261,6 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 			if (!canRender(invocation, forcedLease)) return;
 			const failedOperationStillOwnsCredential = failureLease !== undefined && ownsCredential(failureLease);
 			if (failureLease !== undefined && failedOperationStillOwnsCredential) render(ctx, failureLease);
-			if (
-				isUserRequested &&
-				(failedOperationStillOwnsCredential || (failureLease === undefined && invocation === invocationSequence))
-			) {
-				ctx.ui.notify("Unable to refresh Hypercredit balance", "warning");
-			}
 		}
 	}
 

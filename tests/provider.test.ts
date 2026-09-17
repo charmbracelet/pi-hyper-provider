@@ -96,6 +96,10 @@ test("Pi loads Hyper, persists refreshed models, restores offline, and retains t
 		assert.equal(model.maxTokens, 1024);
 		assert.deepEqual(model.input, ["text", "image"]);
 		assert.equal((await first.runtime.getAuth(model))?.auth.apiKey, "fixture-api-key");
+		assert.equal(
+			(await first.session.extensionRunner.createContext().modelRegistry.getProviderAuth("hyper"))?.auth.apiKey,
+			"fixture-api-key",
+		);
 
 		const runner = first.session.extensionRunner;
 		const message: AssistantMessage = {
@@ -255,9 +259,14 @@ test("Pi loads Hyper, persists refreshed models, restores offline, and retains t
 			expires: Date.now() + 3_600_000,
 		}));
 		assert.equal((await restored.runtime.getAuth("hyper"))?.auth.apiKey, "fixture-oauth-access");
+		const restoredRegistry = restored.session.extensionRunner.createContext().modelRegistry;
+		assert.equal((await restoredRegistry.getProviderAuth("hyper"))?.auth.apiKey, "fixture-oauth-access");
 		await credentials.delete("hyper");
+		assert.equal(await restoredRegistry.getProviderAuth("hyper"), undefined);
+		assert.equal(await restoredRegistry.getProviderAuth("unknown-provider"), undefined);
 		process.env.HYPER_API_KEY = "fixture-environment-key";
 		assert.equal((await restored.runtime.getAuth("hyper"))?.auth.apiKey, "fixture-environment-key");
+		assert.equal((await restoredRegistry.getProviderAuth("hyper"))?.auth.apiKey, "fixture-environment-key");
 
 		const cli = fileURLToPath(new URL("../node_modules/@earendil-works/pi-coding-agent/dist/cli.js", import.meta.url));
 		const mockHttp = fileURLToPath(new URL("./mock-http.ts", import.meta.url));
@@ -298,8 +307,23 @@ test("Pi loads Hyper, persists refreshed models, restores offline, and retains t
 			});
 			assert.equal(child.error, undefined, `${mode}: ${child.error}\n${child.stdout}\n${child.stderr}`);
 			assert.equal(child.status, 0, `${mode}: ${child.stderr}`);
-			const requests = readFileSync(requestLog, "utf8");
-			assert.equal(requests.includes("/v1/provider"), mode === "rpc", `${mode} catalog policy`);
+			const requests = readFileSync(requestLog, "utf8")
+				.trim()
+				.split("\n")
+				.filter(Boolean)
+				.map((line) => {
+					const [url, authorization] = line.split("\t");
+					assert.ok(url);
+					return { url, authorization };
+				});
+			assert.equal(
+				requests.some((request) => request.url.includes("/v1/provider")),
+				mode === "rpc",
+				`${mode} catalog policy`,
+			);
+			for (const request of requests.filter((entry) => entry.url.startsWith("https://hyper.charm.land/v1/"))) {
+				assert.equal(request.authorization, "Bearer fixture-api-key", `${mode}: ${request.url}`);
+			}
 			if (mode === "print" || mode === "json") {
 				assert.ok(child.stdout.includes("fixture response"), child.stdout);
 				assert.equal(child.stdout.includes("Prism →"), false);
