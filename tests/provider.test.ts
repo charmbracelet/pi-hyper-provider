@@ -156,7 +156,11 @@ test("Pi loads Hyper, persists refreshed models, restores offline, and retains t
 				}),
 			);
 			assert.equal(result.valid, true);
-			assert.deepEqual(result.entries, []);
+			assert.equal(result.continue, false);
+			for (const entry of result.entries) {
+				if (entry.type !== "custom") assert.fail(`unexpected ${entry.type} boundary entry`);
+				first.sessionManager.appendCustomEntry(entry.customType, entry.data);
+			}
 		}
 		for (const mode of ["tui", "rpc", "print", "json"] as const) {
 			runner.setUIContext(mode === "tui" || mode === "rpc" ? ui : undefined, mode);
@@ -178,7 +182,7 @@ test("Pi loads Hyper, persists refreshed models, restores offline, and retains t
 				const count = routes().length;
 				await runner.emit({ type: "after_provider_response", status: 200, headers });
 				await runner.emitMessageEnd({ type: "message_end", message });
-				assert.equal(routes().length, count, "wait until the response has been rendered");
+				assert.equal(routes().length, count, "wait until the turn boundary");
 				await emitTurnEnd(0, message);
 			}
 			assert.deepEqual(
@@ -350,6 +354,12 @@ test("Pi loads Hyper, persists refreshed models, restores offline, and retains t
 				assert.ok(child.stdout.includes("fixture response"), child.stdout);
 				assert.equal(child.stdout.includes("Prism →"), false);
 				assert.equal(child.stderr.includes("Prism →"), false);
+			}
+			if (mode === "json") {
+				const assistantMessageEnd = child.stdout.indexOf('{"type":"message_end","message":{"role":"assistant"');
+				const prismEntry = child.stdout.indexOf('"customType":"hyper-prism-route"');
+				assert.ok(assistantMessageEnd >= 0, child.stdout);
+				assert.ok(prismEntry > assistantMessageEnd, child.stdout);
 			}
 			if (mode === "rpc") assert.ok(child.stdout.includes('"command":"get_state"'), child.stdout);
 		}

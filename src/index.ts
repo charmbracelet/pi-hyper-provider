@@ -159,9 +159,11 @@ export default function (pi: ExtensionAPI) {
 			event.message.stopReason === "aborted"
 		)
 			return;
-		// message_end extensions run before the final UI update. turn_end runs
-		// after the assistant and its tool results have been rendered.
-		if (route) pi.appendEntry("hyper-prism-route", route);
+		if (route) {
+			return {
+				entries: [...event.entries, { type: "custom", customType: "hyper-prism-route", data: route }],
+			};
+		}
 	});
 
 	pi.registerProvider(
