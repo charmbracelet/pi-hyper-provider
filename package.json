@@ -30,8 +30,9 @@
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.4.16",
-		"@earendil-works/pi-ai": "^0.85.1",
-		"@earendil-works/pi-coding-agent": "^0.85.1",
+		"@earendil-works/pi-ai": "^0.87.1",
+		"@earendil-works/pi-coding-agent": "^0.87.1",
+		"@earendil-works/pi-tui": "^0.87.1",
 		"typebox": "^1.1.38",
 		"typescript": "^6.0.3"
 	},

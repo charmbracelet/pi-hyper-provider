@@ -119,7 +119,7 @@ test("Pi loads Hyper, persists refreshed models, restores offline, and retains t
 			stopReason: "stop",
 			timestamp: 1,
 		};
-		first.sessionManager.appendMessage(message);
+		const messageEntryId = first.sessionManager.appendMessage(message);
 		const routes = () =>
 			first.sessionManager
 				.getEntries()
@@ -131,6 +131,33 @@ test("Pi loads Hyper, persists refreshed models, restores offline, and retains t
 				assert.fail("routing must use durable entries, not notifications");
 			},
 		};
+		async function emitTurnEnd(turnIndex: number, assistantMessage: AssistantMessage): Promise<void> {
+			const result = await runner.emitBoundary(
+				{
+					type: "turn_end",
+					turnIndex,
+					message: assistantMessage,
+					toolResults: [],
+					messageEntryId,
+					toolResultEntryIds: [],
+					outcome:
+						assistantMessage.stopReason === "aborted"
+							? "aborted"
+							: assistantMessage.stopReason === "error"
+								? "error"
+								: "completed",
+				},
+				() => ({
+					contextEntries: [],
+					contextMessages: [],
+					llmMessages: [],
+					pendingMessages: [],
+					canContinue: false,
+				}),
+			);
+			assert.equal(result.valid, true);
+			assert.deepEqual(result.entries, []);
+		}
 		for (const mode of ["tui", "rpc", "print", "json"] as const) {
 			runner.setUIContext(mode === "tui" || mode === "rpc" ? ui : undefined, mode);
 			assert.equal(runner.createContext().hasUI, mode === "tui" || mode === "rpc");
@@ -152,7 +179,7 @@ test("Pi loads Hyper, persists refreshed models, restores offline, and retains t
 				await runner.emit({ type: "after_provider_response", status: 200, headers });
 				await runner.emitMessageEnd({ type: "message_end", message });
 				assert.equal(routes().length, count, "wait until the response has been rendered");
-				await runner.emit({ type: "turn_end", turnIndex: 0, message, toolResults: [] });
+				await emitTurnEnd(0, message);
 			}
 			assert.deepEqual(
 				routes()
@@ -172,23 +199,18 @@ test("Pi loads Hyper, persists refreshed models, restores offline, and retains t
 			await runner.emit({ type: "turn_start", turnIndex: 1, timestamp: 2 });
 			await runner.emitMessageEnd({ type: "message_end", message });
 			await runner.emit({ type: "after_provider_response", status: 200, headers });
-			await runner.emit({ type: "turn_end", turnIndex: 1, message, toolResults: [] });
+			await emitTurnEnd(1, message);
 			for (const stopReason of ["aborted", "error"] as const) {
 				await runner.emit({ type: "turn_start", turnIndex: 2, timestamp: 3 });
 				await runner.emit({ type: "after_provider_response", status: 200, headers });
 				await runner.emitMessageEnd({ type: "message_end", message: { ...message, stopReason } });
-				await runner.emit({ type: "turn_end", turnIndex: 2, message: { ...message, stopReason }, toolResults: [] });
+				await emitTurnEnd(2, { ...message, stopReason });
 			}
 			await runner.emit({ type: "turn_start", turnIndex: 3, timestamp: 4 });
 			await runner.emit({ type: "after_provider_response", status: 200, headers });
-			await runner.emit({
-				type: "turn_end",
-				turnIndex: 3,
-				message: { ...message, provider: "other" },
-				toolResults: [],
-			});
+			await emitTurnEnd(3, { ...message, provider: "other" });
 			await runner.emit({ type: "turn_start", turnIndex: 3, timestamp: 4 });
-			await runner.emit({ type: "turn_end", turnIndex: 3, message, toolResults: [] });
+			await emitTurnEnd(3, message);
 			assert.equal(routes().length, count, "discard auxiliary, cancelled, failed, and stale routes");
 		}
 	} finally {
