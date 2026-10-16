@@ -19,7 +19,7 @@ run = "npm run typecheck"
 
 [tasks.test]
 description = "Run isolated provider and credit lifecycle regression tests"
-run = "node --experimental-strip-types --import ./node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti-register.mjs --test tests/*.test.ts"
+run = "node --import=tsx --test tests/*.test.ts"
 
 [tasks.check]
 description = "Run Biome checks, then type-check"
